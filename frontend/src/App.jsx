@@ -2,16 +2,25 @@ import { useEffect, useState } from "react";
 import { MessageSquare, LayoutDashboard, Brain, Circle } from "lucide-react";
 import Chat from "./components/Chat.jsx";
 import Dashboard from "./components/Dashboard.jsx";
+import IdentitySwitcher from "./components/IdentitySwitcher.jsx";
 import { api } from "./api.js";
 
 export default function App() {
   const [tab, setTab] = useState("chat");
   const [health, setHealth] = useState(null);
   const [seeded, setSeeded] = useState(false);
+  const [identities, setIdentities] = useState([]);
+  const [identity, setIdentity] = useState(null);
 
   useEffect(() => {
     api.health().then(setHealth).catch(() => setHealth({ status: "down" }));
     api.info().then((i) => setSeeded(i.chunks > 0)).catch(() => {});
+    api.identities()
+      .then((d) => {
+        setIdentities(d.identities);
+        setIdentity(d.identities[0]);
+      })
+      .catch(() => {});
   }, []);
 
   async function ensureSeed() {
@@ -48,12 +57,25 @@ export default function App() {
             </TabButton>
           </nav>
 
-          <HealthPill health={health} />
+          <div className="flex items-center gap-3">
+            {tab === "chat" && identity && (
+              <IdentitySwitcher
+                identities={identities}
+                identity={identity}
+                onChange={setIdentity}
+              />
+            )}
+            <HealthPill health={health} />
+          </div>
         </div>
       </header>
 
       <main className="flex-1 max-w-6xl w-full mx-auto px-5 py-6">
-        {tab === "chat" ? <Chat /> : <Dashboard />}
+        {tab === "chat" ? (
+          <Chat key={identity?.user} identity={identity} />
+        ) : (
+          <Dashboard />
+        )}
       </main>
     </div>
   );

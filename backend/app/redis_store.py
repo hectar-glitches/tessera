@@ -19,12 +19,34 @@ from redis.commands.search.field import NumericField, TagField, TextField, Vecto
 from redis.commands.search.index_definition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
 
-from . import embeddings
+from . import acl, embeddings
+from .acl import Identity
 from .store import BaseStore, CacheCandidate, Chunk, ChunkHit, LogEntry
 
-INDEX_NAME = "tessera:idx"
+INDEX_NAME = "tessera:idx:v2"  # bumped: schema now carries acl_level/acl_team
 KEY_PREFIX = "org:"
 ENT_SEP = "|"
+TEAM_ALL = "all"
+
+
+def _enc_team(teams: Optional[List[str]]) -> str:
+    return ENT_SEP.join(teams) if teams else TEAM_ALL
+
+
+def _dec_team(raw: str) -> List[str]:
+    if not raw:
+        return []
+    return [t for t in raw.split(ENT_SEP) if t and t != TEAM_ALL]
+
+
+def _acl_filter(identity: Optional[Identity]) -> str:
+    """RediSearch clause that scopes results to what an identity may see."""
+    if identity is None:
+        return ""
+    parts = [f"@acl_level:[-inf {identity.rank}]"]
+    if not identity.is_exec:  # exec sees across teams
+        parts.append(f"@acl_team:{{{TEAM_ALL}|{identity.team}}}")
+    return " " + " ".join(parts)
 
 # Atomic cache write: HSET the entry, register it in the org cache set, and add it to
 # each contributing chunk's reverse set — all in one shot.
@@ -74,6 +96,8 @@ class RedisStore(BaseStore):
                 TagField("chunk_id"),
                 TagField("hash"),
                 TagField("entities", separator=ENT_SEP),
+                NumericField("acl_level"),
+                TagField("acl_team", separator=ENT_SEP),
                 TextField("text"),
                 VectorField(
                     "vector",
@@ -146,29 +170,36 @@ class RedisStore(BaseStore):
                     "chunk_id": c.chunk_id,
                     "hash": c.hash,
                     "entities": ENT_SEP.join(c.entities) if c.entities else "",
+                    "acl_level": acl.level_rank(c.acl_level),
+                    "acl_team": _enc_team(c.acl_teams),
                     "text": c.text,
                     "vector": _to_bytes(c.vector),
                 },
             )
         pipe.execute()
 
-    def search_chunks(self, org: str, qvec: np.ndarray, k: int) -> List[ChunkHit]:
+    def search_chunks(self, org, qvec, k, identity=None) -> List[ChunkHit]:
+        flt = _acl_filter(identity)
         q = (
-            Query(f"(@org:{{{org}}} @doctype:{{chunk}})=>[KNN {k} @vector $vec AS score]")
+            Query(f"(@org:{{{org}}} @doctype:{{chunk}}{flt})=>[KNN {k} @vector $vec AS score]")
             .sort_by("score")
-            .return_fields("chunk_id", "text", "entities", "score")
+            .return_fields("chunk_id", "text", "entities", "acl_level", "acl_team", "score")
             .dialect(2)
         )
         res = self.r.ft(INDEX_NAME).search(q, query_params={"vec": _to_bytes(qvec)})
         hits = []
         for doc in res.docs:
             ents = doc.entities.split(ENT_SEP) if getattr(doc, "entities", "") else []
-            hits.append(ChunkHit(doc.chunk_id, doc.text, 1.0 - float(doc.score), ents))
+            lvl = acl.rank_to_name(int(getattr(doc, "acl_level", 0) or 0))
+            teams = _dec_team(getattr(doc, "acl_team", ""))
+            hits.append(ChunkHit(doc.chunk_id, doc.text, 1.0 - float(doc.score), ents,
+                                 lvl, teams))
         return hits
 
     # ----- cache -----
     def write_cache_entry(self, org, hash_, question, answer, vector, entities,
-                          chunk_ids, tokens_in, tokens_out) -> None:
+                          chunk_ids, tokens_in, tokens_out, acl_level="public",
+                          acl_teams=None) -> None:
         cache_key = self._cache_key(org, hash_)
         cacheidx = self._cacheidx_key(org)
         fields = {
@@ -181,6 +212,8 @@ class RedisStore(BaseStore):
             "chunk_ids": json.dumps(chunk_ids),
             "tokens_in": str(tokens_in),
             "tokens_out": str(tokens_out),
+            "acl_level": acl.level_rank(acl_level),
+            "acl_team": _enc_team(acl_teams),
             "vector": _to_bytes(vector),
         }
         flat: List = []
@@ -204,14 +237,17 @@ class RedisStore(BaseStore):
             chunk_ids=chunk_ids,
             tokens_in=int(getattr(doc, "tokens_in", 0) or 0),
             tokens_out=int(getattr(doc, "tokens_out", 0) or 0),
+            acl_level=acl.rank_to_name(int(getattr(doc, "acl_level", 0) or 0)),
+            acl_teams=_dec_team(getattr(doc, "acl_team", "")),
         )
 
-    def search_cache(self, org, qvec, k) -> List[CacheCandidate]:
+    def search_cache(self, org, qvec, k, identity=None) -> List[CacheCandidate]:
+        flt = _acl_filter(identity)
         q = (
-            Query(f"(@org:{{{org}}} @doctype:{{cache}})=>[KNN {k} @vector $vec AS score]")
+            Query(f"(@org:{{{org}}} @doctype:{{cache}}{flt})=>[KNN {k} @vector $vec AS score]")
             .sort_by("score")
             .return_fields("hash", "question", "answer", "entities", "chunk_ids",
-                           "tokens_in", "tokens_out", "score")
+                           "tokens_in", "tokens_out", "acl_level", "acl_team", "score")
             .dialect(2)
         )
         res = self.r.ft(INDEX_NAME).search(q, query_params={"vec": _to_bytes(qvec)})
@@ -221,17 +257,20 @@ class RedisStore(BaseStore):
         data = self.r.hgetall(self._cache_key(org, hash_))
         if not data:
             return None
-        d = {k.decode(): v for k, v in data.items()}
+        d = {k.decode(): (v.decode() if isinstance(v, bytes) else v)
+             for k, v in data.items() if k != b"vector"}
         ents = d.get("entities", "").split(ENT_SEP) if d.get("entities") else []
         return CacheCandidate(
-            hash=d["hash"].decode() if isinstance(d["hash"], bytes) else d["hash"],
-            question=d["question"].decode() if isinstance(d["question"], bytes) else d["question"],
-            answer=d["answer"].decode() if isinstance(d["answer"], bytes) else d["answer"],
+            hash=d["hash"],
+            question=d["question"],
+            answer=d["answer"],
             score=1.0,
-            entities=[e.decode() if isinstance(e, bytes) else e for e in ents],
+            entities=ents,
             chunk_ids=json.loads(d.get("chunk_ids", "[]")),
             tokens_in=int(d.get("tokens_in", 0) or 0),
             tokens_out=int(d.get("tokens_out", 0) or 0),
+            acl_level=acl.rank_to_name(int(d.get("acl_level", 0) or 0)),
+            acl_teams=_dec_team(d.get("acl_team", "")),
         )
 
     def invalidate_chunks(self, org, chunk_ids) -> List[str]:

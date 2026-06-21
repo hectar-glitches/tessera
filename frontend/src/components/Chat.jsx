@@ -1,15 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { Send, Zap, Sparkles, HelpCircle, ArrowRight } from "lucide-react";
+import { Send, Zap, Sparkles, HelpCircle, ArrowRight, Lock, FileText } from "lucide-react";
 import { api } from "../api.js";
+import { LevelBadge } from "./IdentitySwitcher.jsx";
 
 const STARTERS = [
   "What time is Saturday lunch?",
-  "What is the prize for Ddoski's Toolbox?",
-  "How big can my team be?",
   "Who are the sponsors?",
+  "What are the sponsorship contract dollar amounts?",
+  "What is the engineering platform infrastructure?",
 ];
 
-export default function Chat() {
+export default function Chat({ identity }) {
   const [messages, setMessages] = useState([
     {
       role: "bot",
@@ -34,7 +35,7 @@ export default function Chat() {
     }
     setLoading(true);
     try {
-      const r = await api.query(question, accept_hash, force_generate);
+      const r = await api.query(question, { accept_hash, force_generate, identity });
       if (r.decision === "suggest" && !force_generate) {
         setPending({ question, suggestions: r.suggestions });
       } else {
@@ -60,7 +61,13 @@ export default function Chat() {
         <div className="px-5 py-3 border-b border-edge flex items-center gap-2">
           <Sparkles size={16} className="text-indigo-400" />
           <span className="font-medium">Ask Ddoski</span>
-          <span className="text-xs text-slate-500 ml-auto">cached answers are served instantly &amp; free</span>
+          {identity && (
+            <span className="text-xs text-slate-400 ml-3 flex items-center gap-1.5">
+              asking as <b className="text-slate-200">{identity.user}</b>
+              <LevelBadge level={identity.level} teams={identity.team !== "all" ? [identity.team] : []} />
+            </span>
+          )}
+          <span className="text-xs text-slate-500 ml-auto">answers are scoped to your access</span>
         </div>
 
         <div className="flex-1 overflow-y-auto scrollbar-thin px-5 py-4 space-y-4">
@@ -128,7 +135,32 @@ function Bubble({ m }) {
       >
         {!isUser && m.meta && <DecisionTag meta={m.meta} />}
         <div className="whitespace-pre-wrap">{m.text}</div>
+        {!isUser && m.meta && <AccessFooter meta={m.meta} />}
       </div>
+    </div>
+  );
+}
+
+function AccessFooter({ meta }) {
+  if (meta.via === "policy") {
+    return (
+      <div className="mt-2 flex items-center gap-1.5 text-[11px] text-rose-300">
+        <Lock size={12} /> blocked by access policy
+      </div>
+    );
+  }
+  if (!meta.access_level) return null;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-500 border-t border-edge/60 pt-1.5">
+      <span className="flex items-center gap-1">
+        <Lock size={11} /> classified
+      </span>
+      <LevelBadge level={meta.access_level} teams={meta.access_teams} />
+      {meta.sources && meta.sources.length > 0 && (
+        <span className="flex items-center gap-1 ml-auto">
+          <FileText size={11} /> {meta.sources.join(", ")}
+        </span>
+      )}
     </div>
   );
 }

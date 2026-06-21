@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import embeddings, eval as eval_mod, ingest as ingest_mod
+from . import acl, embeddings, eval as eval_mod, ingest as ingest_mod
 from .config import get_settings
 from .engine import Engine
 from .llm import get_llm
@@ -20,6 +20,15 @@ from .models import BudgetRequest, IngestRequest, QueryRequest, QueryResponse
 from .store import get_store
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+# Demo personas for the IAM story (intern-vs-CEO + same-team sharing).
+DEMO_IDENTITIES = [
+    {"user": "Maya", "role": "Intern", "team": "engineering", "level": "employee"},
+    {"user": "Leo", "role": "Engineer", "team": "engineering", "level": "employee"},
+    {"user": "Raj", "role": "Eng Manager", "team": "engineering", "level": "manager"},
+    {"user": "Priya", "role": "Finance Manager", "team": "finance", "level": "manager"},
+    {"user": "Dana", "role": "CEO", "team": "exec", "level": "exec"},
+]
 
 app = FastAPI(title="Tessera", version="1.0.0")
 app.add_middleware(
@@ -77,13 +86,20 @@ def get_guide(org: str):
     return {"document": (DATA_DIR / "ask_ddoski_guide.md").read_text()}
 
 
+@app.get("/api/identities")
+def identities():
+    return {"identities": DEMO_IDENTITIES, "levels": list(acl.LEVELS.keys())}
+
+
 @app.post("/api/orgs/{org}/query", response_model=QueryResponse)
 def query(org: str, req: QueryRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Empty question")
+    identity = acl.Identity.from_dict(req.identity.model_dump() if req.identity else None)
     result = _engine().query(
         org=org,
         question=req.question,
+        identity=identity,
         accept_hash=req.accept_hash,
         force_generate=req.force_generate,
     )

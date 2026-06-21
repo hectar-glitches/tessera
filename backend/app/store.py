@@ -14,7 +14,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from . import embeddings
+from . import acl, embeddings
+from .acl import Identity
 
 
 @dataclass
@@ -23,6 +24,8 @@ class ChunkHit:
     text: str
     score: float
     entities: List[str]
+    acl_level: str = "public"
+    acl_teams: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -35,6 +38,8 @@ class CacheCandidate:
     chunk_ids: List[str]
     tokens_in: int = 0
     tokens_out: int = 0
+    acl_level: str = "public"
+    acl_teams: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -44,6 +49,8 @@ class Chunk:
     hash: str
     entities: List[str]
     vector: np.ndarray
+    acl_level: str = "public"
+    acl_teams: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -56,6 +63,8 @@ class LogEntry:
     tokens_saved: int
     dollars_saved: float
     note: str = ""
+    actor: str = ""
+    access: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -80,7 +89,8 @@ class BaseStore(ABC):
     def replace_chunks(self, org: str, chunks: List[Chunk]) -> None: ...
 
     @abstractmethod
-    def search_chunks(self, org: str, qvec: np.ndarray, k: int) -> List[ChunkHit]: ...
+    def search_chunks(self, org: str, qvec: np.ndarray, k: int,
+                      identity: Optional[Identity] = None) -> List[ChunkHit]: ...
 
     # ----- cache -----
     @abstractmethod
@@ -95,11 +105,14 @@ class BaseStore(ABC):
         chunk_ids: List[str],
         tokens_in: int,
         tokens_out: int,
+        acl_level: str = "public",
+        acl_teams: Optional[List[str]] = None,
     ) -> None:
         """Atomically write the cache entry AND its reverse-index updates."""
 
     @abstractmethod
-    def search_cache(self, org: str, qvec: np.ndarray, k: int) -> List[CacheCandidate]: ...
+    def search_cache(self, org: str, qvec: np.ndarray, k: int,
+                     identity: Optional[Identity] = None) -> List[CacheCandidate]: ...
 
     @abstractmethod
     def get_cache_entry(self, org: str, hash_: str) -> Optional[CacheCandidate]: ...
@@ -171,35 +184,41 @@ class MemoryStore(BaseStore):
     def replace_chunks(self, org: str, chunks: List[Chunk]) -> None:
         self._chunks[org] = {c.chunk_id: c for c in chunks}
 
-    def search_chunks(self, org: str, qvec: np.ndarray, k: int) -> List[ChunkHit]:
+    def search_chunks(self, org, qvec, k, identity=None) -> List[ChunkHit]:
         hits = []
         for c in self._chunks.get(org, {}).values():
+            if identity and not acl.can_access(identity, c.acl_level, c.acl_teams):
+                continue
             hits.append(ChunkHit(c.chunk_id, c.text, embeddings.cosine(qvec, c.vector),
-                                 c.entities))
+                                 c.entities, c.acl_level, c.acl_teams))
         hits.sort(key=lambda h: h.score, reverse=True)
         return hits[:k]
 
     # cache
     def write_cache_entry(self, org, hash_, question, answer, vector, entities,
-                          chunk_ids, tokens_in, tokens_out) -> None:
+                          chunk_ids, tokens_in, tokens_out, acl_level="public",
+                          acl_teams=None) -> None:
         self._cache.setdefault(org, {})[hash_] = CacheCandidate(
             hash=hash_, question=question, answer=answer, score=1.0,
             entities=entities, chunk_ids=chunk_ids, tokens_in=tokens_in,
-            tokens_out=tokens_out,
+            tokens_out=tokens_out, acl_level=acl_level, acl_teams=acl_teams or [],
         )
         self._cache_vecs.setdefault(org, {})[hash_] = vector
         rev = self._reverse.setdefault(org, {})
         for cid in chunk_ids:
             rev.setdefault(cid, set()).add(hash_)
 
-    def search_cache(self, org, qvec, k) -> List[CacheCandidate]:
+    def search_cache(self, org, qvec, k, identity=None) -> List[CacheCandidate]:
         out = []
         vecs = self._cache_vecs.get(org, {})
         for h, entry in self._cache.get(org, {}).items():
+            if identity and not acl.can_access(identity, entry.acl_level, entry.acl_teams):
+                continue
             score = embeddings.cosine(qvec, vecs[h])
             out.append(CacheCandidate(entry.hash, entry.question, entry.answer, score,
                                       entry.entities, entry.chunk_ids,
-                                      entry.tokens_in, entry.tokens_out))
+                                      entry.tokens_in, entry.tokens_out,
+                                      entry.acl_level, entry.acl_teams))
         out.sort(key=lambda c: c.score, reverse=True)
         return out[:k]
 

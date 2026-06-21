@@ -150,6 +150,7 @@ function ActivityFeed({ events }) {
               <div className="flex-1 min-w-0">
                 <div className="text-sm truncate">{e.question}</div>
                 <div className="text-[11px] text-slate-500">
+                  {e.actor && <span className="text-slate-400">{e.actor} · </span>}
                   sim {e.similarity.toFixed(2)}
                   {e.tokens_saved > 0 && ` · saved $${e.dollars_saved.toFixed(5)}`}
                   {e.note && ` · ${e.note}`}

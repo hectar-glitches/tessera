@@ -13,14 +13,15 @@ async function req(path, opts = {}) {
 export const api = {
   health: () => req(`/health`),
   info: () => req(`/orgs/${ORG}/info`),
+  identities: () => req(`/identities`),
   ingestSeed: () => req(`/orgs/${ORG}/ingest/seed`, { method: "POST" }),
   ingest: (document) =>
     req(`/orgs/${ORG}/ingest`, { method: "POST", body: JSON.stringify({ document }) }),
   guide: () => req(`/orgs/${ORG}/guide`),
-  query: (question, accept_hash = null, force_generate = false) =>
+  query: (question, { accept_hash = null, force_generate = false, identity = null } = {}) =>
     req(`/orgs/${ORG}/query`, {
       method: "POST",
-      body: JSON.stringify({ question, accept_hash, force_generate }),
+      body: JSON.stringify({ question, accept_hash, force_generate, identity }),
     }),
   stats: () => req(`/orgs/${ORG}/stats`),
   activity: (limit = 40) => req(`/orgs/${ORG}/activity?limit=${limit}`),
