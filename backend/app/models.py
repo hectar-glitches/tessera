@@ -61,3 +61,4 @@ class QueryResponse(BaseModel):
     access_level: str = "public"
     access_teams: List[str] = []
     sources: List[str] = []
+    expires_at: float = 0.0

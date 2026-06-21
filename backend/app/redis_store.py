@@ -16,7 +16,10 @@ from typing import Dict, List, Optional
 import numpy as np
 import redis
 from redis.commands.search.field import NumericField, TagField, TextField, VectorField
-from redis.commands.search.index_definition import IndexDefinition, IndexType
+try:  # redis-py >= 6.x exposes snake_case; <= 5.0.x uses camelCase.
+    from redis.commands.search.index_definition import IndexDefinition, IndexType
+except ImportError:  # pragma: no cover - depends on installed redis-py version
+    from redis.commands.search.indexDefinition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
 
 from . import acl, embeddings

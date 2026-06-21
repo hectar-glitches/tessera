@@ -16,6 +16,7 @@ import numpy as np
 
 from . import acl, embeddings
 from .acl import Identity
+from .config import get_settings
 
 
 @dataclass
@@ -46,6 +47,8 @@ class CacheCandidate:
     hit_count: int = 0
     created_at: float = 0.0
     last_asked_at: float = 0.0
+    # Label-aware TTL: absolute unix expiry; 0.0 == never expires.
+    expires_at: float = 0.0
     # RBAC access-control fields
     acl_level: str = "public"
     acl_teams: List[str] = field(default_factory=list)
@@ -269,12 +272,14 @@ class MemoryStore(BaseStore):
                           tenure="", min_seniority_level=1, acl_level="public",
                           acl_teams=None) -> None:
         now = time.time()
+        ttl = get_settings().cache_ttl_for(acl_level)
         self._cache.setdefault(org, {})[hash_] = CacheCandidate(
             hash=hash_, question=question, answer=answer, score=1.0,
             entities=entities, chunk_ids=chunk_ids, tokens_in=tokens_in,
             tokens_out=tokens_out, role=role, seniority=seniority, tenure=tenure,
             min_seniority_level=int(min_seniority_level), hit_count=0,
             created_at=now, last_asked_at=now,
+            expires_at=(now + ttl) if ttl > 0 else 0.0,
             acl_level=acl_level, acl_teams=acl_teams or [],
         )
         self._cache_vecs.setdefault(org, {})[hash_] = vector
@@ -282,10 +287,33 @@ class MemoryStore(BaseStore):
         for cid in chunk_ids:
             rev.setdefault(cid, set()).add(hash_)
 
+    def _sweep_expired(self, org: str) -> None:
+        """Drop entries past their label-aware TTL, cleaning the reverse index too.
+
+        Lazy/self-healing: called at the start of every read path so expired answers
+        are never served and never counted, mirroring Redis's native key expiry.
+        """
+        cache = self._cache.get(org)
+        if not cache:
+            return
+        now = time.time()
+        expired = [h for h, e in cache.items() if e.expires_at and e.expires_at <= now]
+        if not expired:
+            return
+        vecs = self._cache_vecs.get(org, {})
+        rev = self._reverse.get(org, {})
+        for h in expired:
+            entry = cache.pop(h, None)
+            vecs.pop(h, None)
+            if entry:
+                for cid in entry.chunk_ids:
+                    rev.get(cid, set()).discard(h)
+
     def search_cache(self, org, qvec, k, user_level=None, role=None,
                      tenure=None, identity=None) -> List[CacheCandidate]:
         from .roles import can_view, tenure_boost
 
+        self._sweep_expired(org)
         out = []
         vecs = self._cache_vecs.get(org, {})
         for h, entry in self._cache.get(org, {}).items():
@@ -303,22 +331,31 @@ class MemoryStore(BaseStore):
                 role=entry.role, seniority=entry.seniority, tenure=entry.tenure,
                 min_seniority_level=entry.min_seniority_level, hit_count=entry.hit_count,
                 created_at=entry.created_at, last_asked_at=entry.last_asked_at,
+                expires_at=entry.expires_at,
                 acl_level=entry.acl_level, acl_teams=entry.acl_teams,
             ))
         out.sort(key=lambda c: c.score, reverse=True)
         return out[:k]
 
     def get_cache_entry(self, org, hash_) -> Optional[CacheCandidate]:
+        self._sweep_expired(org)
         return self._cache.get(org, {}).get(hash_)
 
     def bump_hit(self, org, hash_) -> None:
         entry = self._cache.get(org, {}).get(hash_)
         if entry:
+            now = time.time()
             entry.hit_count += 1
-            entry.last_asked_at = time.time()
+            entry.last_asked_at = now
+            # Sliding refresh: a served answer is demonstrably still wanted, so push its
+            # expiry out. Hot entries stay warm; only cold ones age out (LFU-like).
+            ttl = get_settings().cache_ttl_for(entry.acl_level)
+            if ttl > 0:
+                entry.expires_at = now + ttl
 
     def list_entries(self, org, role=None, seniority=None,
                      tenure=None) -> List[CacheCandidate]:
+        self._sweep_expired(org)
         out = []
         for entry in self._cache.get(org, {}).values():
             if role and entry.role != role:
@@ -369,6 +406,7 @@ class MemoryStore(BaseStore):
         return sorted(dropped)
 
     def cache_size(self, org) -> int:
+        self._sweep_expired(org)
         return len(self._cache.get(org, {}))
 
     # logs / stats
@@ -404,14 +442,23 @@ def get_store() -> BaseStore:
     from .config import get_settings
 
     settings = get_settings()
-    try:
-        from .redis_store import RedisStore
+    # An HA Redis endpoint can briefly stall a new connection during failover, so a
+    # single blip shouldn't doom the whole process to the in-memory fallback. Retry a
+    # few times with short backoff before giving up.
+    last_exc: Optional[Exception] = None
+    for attempt in range(3):
+        try:
+            from .redis_store import RedisStore
 
-        rs = RedisStore(settings.redis_url, settings.default_budget_usd)
-        rs.ensure_ready()
-        _store = rs
-    except Exception as exc:  # pragma: no cover - depends on environment
-        print(f"[tessera] Redis unavailable ({exc}); using in-memory store.")
-        _store = MemoryStore(settings.default_budget_usd)
-        _store.ensure_ready()
+            rs = RedisStore(settings.redis_url, settings.default_budget_usd)
+            rs.ensure_ready()
+            _store = rs
+            return _store
+        except Exception as exc:  # pragma: no cover - depends on environment
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+    print(f"[tessera] Redis unavailable ({last_exc}); using in-memory store.")
+    _store = MemoryStore(settings.default_budget_usd)
+    _store.ensure_ready()
     return _store

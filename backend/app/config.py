@@ -31,6 +31,15 @@ class Settings(BaseSettings):
     # Default monthly budget per org (USD) used by the dashboard budget bar
     default_budget_usd: float = 50.0
 
+    # Label-aware cache TTL (seconds). Correctness is handled event-driven by the
+    # reverse-index invalidation on source edits; these TTLs are a *risk ceiling*:
+    # more sensitive answers expire sooner, bounding both staleness from out-of-band
+    # drift and the blast radius of any mislabel. 0 disables expiry for that tier.
+    cache_ttl_public: int = 604800     # 7 days  — cheap, low-risk, maximize hit rate
+    cache_ttl_employee: int = 86400    # 24 hours
+    cache_ttl_manager: int = 3600      # 1 hour
+    cache_ttl_exec: int = 900          # 15 minutes — tightest window for top secrecy
+
     # Arize observability (optional). Without keys, decisions are logged to stdout.
     arize_api_key: str = ""
     arize_space_key: str = ""
@@ -56,6 +65,18 @@ class Settings(BaseSettings):
         if not raw or raw == "*":
             return ["*"]
         return [o.strip() for o in raw.split(",") if o.strip()]
+
+    def cache_ttl_for(self, level: str) -> int:
+        """TTL (seconds) for a cache entry given its ACL sensitivity level.
+
+        Returns 0 (no expiry) for unknown levels and any tier explicitly set to 0.
+        """
+        return {
+            "public": self.cache_ttl_public,
+            "employee": self.cache_ttl_employee,
+            "manager": self.cache_ttl_manager,
+            "exec": self.cache_ttl_exec,
+        }.get((level or "public").lower(), self.cache_ttl_public)
 
 
 @lru_cache
