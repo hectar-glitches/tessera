@@ -7,6 +7,11 @@ class QueryRequest(BaseModel):
     question: str
     accept_hash: Optional[str] = None
     force_generate: bool = False
+    # OrgCache role-aware segmentation (all optional -> legacy behavior when omitted)
+    role: Optional[str] = None
+    seniority: Optional[str] = None
+    tenure: Optional[str] = None
+    user_level: Optional[int] = None
 
 
 class IngestRequest(BaseModel):
@@ -15,6 +20,11 @@ class IngestRequest(BaseModel):
 
 class BudgetRequest(BaseModel):
     budget: float = Field(gt=0)
+
+
+class EntryUpdateRequest(BaseModel):
+    answer: Optional[str] = None
+    min_seniority_level: Optional[int] = Field(default=None, ge=1, le=5)
 
 
 class SuggestionModel(BaseModel):
@@ -37,3 +47,6 @@ class QueryResponse(BaseModel):
     via: str = ""
     model: str = ""
     entities: List[str] = []
+    role: str = ""
+    seniority: str = ""
+    min_seniority_level: int = 1

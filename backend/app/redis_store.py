@@ -63,28 +63,51 @@ class RedisStore(BaseStore):
         self._write_sha: Optional[str] = None
 
     # ----- lifecycle -----
+    def _schema(self):
+        return (
+            TagField("org"),
+            TagField("doctype"),
+            TagField("chunk_id"),
+            TagField("hash"),
+            TagField("entities", separator=ENT_SEP),
+            # OrgCache role-aware fields (filterable).
+            TagField("role"),
+            TagField("seniority"),
+            TagField("tenure"),
+            NumericField("min_seniority_level"),
+            TextField("text"),
+            VectorField(
+                "vector",
+                "HNSW",
+                {"TYPE": "FLOAT32", "DIM": self.dim, "DISTANCE_METRIC": "COSINE"},
+            ),
+        )
+
+    def _create_index(self) -> None:
+        self.r.ft(INDEX_NAME).create_index(
+            self._schema(),
+            definition=IndexDefinition(prefix=[KEY_PREFIX], index_type=IndexType.HASH),
+        )
+
     def ensure_ready(self) -> None:
         self.r.ping()
         try:
-            self.r.ft(INDEX_NAME).info()
+            info = self.r.ft(INDEX_NAME).info()
+            # Auto-migrate: if the index predates the OrgCache fields, drop (keeping the
+            # documents) and recreate so role/seniority filtering works.
+            attrs = info.get("attributes", [])
+            names = set()
+            for a in attrs:
+                a = [x.decode() if isinstance(x, bytes) else x for x in a]
+                if "identifier" in a:
+                    names.add(a[a.index("identifier") + 1])
+                elif a:
+                    names.add(a[1] if len(a) > 1 else a[0])
+            if "min_seniority_level" not in names:
+                self.r.ft(INDEX_NAME).dropindex(delete_documents=False)
+                self._create_index()
         except redis.ResponseError:
-            schema = (
-                TagField("org"),
-                TagField("doctype"),
-                TagField("chunk_id"),
-                TagField("hash"),
-                TagField("entities", separator=ENT_SEP),
-                TextField("text"),
-                VectorField(
-                    "vector",
-                    "HNSW",
-                    {"TYPE": "FLOAT32", "DIM": self.dim, "DISTANCE_METRIC": "COSINE"},
-                ),
-            )
-            self.r.ft(INDEX_NAME).create_index(
-                schema,
-                definition=IndexDefinition(prefix=[KEY_PREFIX], index_type=IndexType.HASH),
-            )
+            self._create_index()
         self._write_sha = self.r.script_load(LUA_WRITE)
 
     def _scan_del(self, pattern: str) -> None:
@@ -168,9 +191,11 @@ class RedisStore(BaseStore):
 
     # ----- cache -----
     def write_cache_entry(self, org, hash_, question, answer, vector, entities,
-                          chunk_ids, tokens_in, tokens_out) -> None:
+                          chunk_ids, tokens_in, tokens_out, role="", seniority="",
+                          tenure="", min_seniority_level=1) -> None:
         cache_key = self._cache_key(org, hash_)
         cacheidx = self._cacheidx_key(org)
+        now = time.time()
         fields = {
             "org": org,
             "doctype": "cache",
@@ -181,6 +206,13 @@ class RedisStore(BaseStore):
             "chunk_ids": json.dumps(chunk_ids),
             "tokens_in": str(tokens_in),
             "tokens_out": str(tokens_out),
+            "role": role or "",
+            "seniority": seniority or "",
+            "tenure": tenure or "",
+            "min_seniority_level": str(int(min_seniority_level)),
+            "hit_count": "0",
+            "created_at": str(now),
+            "last_asked_at": str(now),
             "vector": _to_bytes(vector),
         }
         flat: List = []
@@ -190,6 +222,10 @@ class RedisStore(BaseStore):
         keys = [cache_key, cacheidx] + [self._chunkmap_key(org, c) for c in chunk_ids]
         argv = [str(len(fields))] + flat
         self.r.evalsha(self._write_sha, len(keys), *keys, *argv)
+
+    _CACHE_FIELDS = ("hash", "question", "answer", "entities", "chunk_ids",
+                     "tokens_in", "tokens_out", "role", "seniority", "tenure",
+                     "min_seniority_level", "hit_count", "created_at", "last_asked_at")
 
     def _doc_to_candidate(self, doc) -> CacheCandidate:
         ents = doc.entities.split(ENT_SEP) if getattr(doc, "entities", "") else []
@@ -204,35 +240,132 @@ class RedisStore(BaseStore):
             chunk_ids=chunk_ids,
             tokens_in=int(getattr(doc, "tokens_in", 0) or 0),
             tokens_out=int(getattr(doc, "tokens_out", 0) or 0),
+            role=getattr(doc, "role", "") or "",
+            seniority=getattr(doc, "seniority", "") or "",
+            tenure=getattr(doc, "tenure", "") or "",
+            min_seniority_level=int(getattr(doc, "min_seniority_level", 1) or 1),
+            hit_count=int(getattr(doc, "hit_count", 0) or 0),
+            created_at=float(getattr(doc, "created_at", 0) or 0),
+            last_asked_at=float(getattr(doc, "last_asked_at", 0) or 0),
         )
 
-    def search_cache(self, org, qvec, k) -> List[CacheCandidate]:
+    def search_cache(self, org, qvec, k, user_level=None, role=None,
+                     tenure=None) -> List[CacheCandidate]:
+        from .roles import tenure_boost
+
+        filters = [f"@org:{{{org}}}", "@doctype:{cache}"]
+        if user_level is not None:
+            filters.append(f"@min_seniority_level:[-inf {int(user_level)}]")
+        if role:
+            filters.append(f"@role:{{{role}}}")
+        base = "(" + " ".join(filters) + ")"
         q = (
-            Query(f"(@org:{{{org}}} @doctype:{{cache}})=>[KNN {k} @vector $vec AS score]")
+            Query(f"{base}=>[KNN {k} @vector $vec AS score]")
             .sort_by("score")
-            .return_fields("hash", "question", "answer", "entities", "chunk_ids",
-                           "tokens_in", "tokens_out", "score")
+            .return_fields(*self._CACHE_FIELDS, "score")
             .dialect(2)
         )
         res = self.r.ft(INDEX_NAME).search(q, query_params={"vec": _to_bytes(qvec)})
-        return [self._doc_to_candidate(d) for d in res.docs]
+        cands = [self._doc_to_candidate(d) for d in res.docs]
+        if tenure:
+            for c in cands:
+                c.score += tenure_boost(tenure, c.tenure)
+            cands.sort(key=lambda c: c.score, reverse=True)
+        return cands
+
+    @staticmethod
+    def _dec(v):
+        return v.decode() if isinstance(v, bytes) else v
+
+    def _hash_to_candidate(self, raw: dict) -> CacheCandidate:
+        d = {self._dec(k): self._dec(v) for k, v in raw.items()}
+        ents = d.get("entities", "").split(ENT_SEP) if d.get("entities") else []
+        return CacheCandidate(
+            hash=d.get("hash", ""),
+            question=d.get("question", ""),
+            answer=d.get("answer", ""),
+            score=1.0,
+            entities=ents,
+            chunk_ids=json.loads(d.get("chunk_ids", "[]")),
+            tokens_in=int(d.get("tokens_in", 0) or 0),
+            tokens_out=int(d.get("tokens_out", 0) or 0),
+            role=d.get("role", ""),
+            seniority=d.get("seniority", ""),
+            tenure=d.get("tenure", ""),
+            min_seniority_level=int(d.get("min_seniority_level", 1) or 1),
+            hit_count=int(d.get("hit_count", 0) or 0),
+            created_at=float(d.get("created_at", 0) or 0),
+            last_asked_at=float(d.get("last_asked_at", 0) or 0),
+        )
 
     def get_cache_entry(self, org, hash_) -> Optional[CacheCandidate]:
         data = self.r.hgetall(self._cache_key(org, hash_))
         if not data:
             return None
-        d = {k.decode(): v for k, v in data.items()}
-        ents = d.get("entities", "").split(ENT_SEP) if d.get("entities") else []
-        return CacheCandidate(
-            hash=d["hash"].decode() if isinstance(d["hash"], bytes) else d["hash"],
-            question=d["question"].decode() if isinstance(d["question"], bytes) else d["question"],
-            answer=d["answer"].decode() if isinstance(d["answer"], bytes) else d["answer"],
-            score=1.0,
-            entities=[e.decode() if isinstance(e, bytes) else e for e in ents],
-            chunk_ids=json.loads(d.get("chunk_ids", "[]")),
-            tokens_in=int(d.get("tokens_in", 0) or 0),
-            tokens_out=int(d.get("tokens_out", 0) or 0),
-        )
+        return self._hash_to_candidate(data)
+
+    def bump_hit(self, org, hash_) -> None:
+        key = self._cache_key(org, hash_)
+        if self.r.exists(key):
+            pipe = self.r.pipeline()
+            pipe.hincrby(key, "hit_count", 1)
+            pipe.hset(key, "last_asked_at", str(time.time()))
+            pipe.execute()
+
+    def _iter_cache_keys(self, org):
+        cursor = 0
+        while True:
+            cursor, keys = self.r.scan(cursor, match=self._cache_key(org, "*"), count=500)
+            for k in keys:
+                yield k
+            if cursor == 0:
+                break
+
+    def list_entries(self, org, role=None, seniority=None,
+                     tenure=None) -> List[CacheCandidate]:
+        out: List[CacheCandidate] = []
+        for k in self._iter_cache_keys(org):
+            data = self.r.hgetall(k)
+            if not data:
+                continue
+            c = self._hash_to_candidate(data)
+            if role and c.role != role:
+                continue
+            if seniority and c.seniority != seniority:
+                continue
+            if tenure and c.tenure != tenure:
+                continue
+            out.append(c)
+        out.sort(key=lambda e: e.hit_count, reverse=True)
+        return out
+
+    def update_entry(self, org, hash_, answer=None,
+                     min_seniority_level=None) -> Optional[CacheCandidate]:
+        key = self._cache_key(org, hash_)
+        if not self.r.exists(key):
+            return None
+        updates = {}
+        if answer is not None:
+            updates["answer"] = answer
+        if min_seniority_level is not None:
+            updates["min_seniority_level"] = str(int(min_seniority_level))
+        if updates:
+            self.r.hset(key, mapping=updates)
+        return self.get_cache_entry(org, hash_)
+
+    def delete_entry(self, org, hash_) -> bool:
+        key = self._cache_key(org, hash_)
+        entry = self.r.hgetall(key)
+        if not entry:
+            return False
+        ids = json.loads(self._dec(entry.get(b"chunk_ids", b"[]")) or "[]")
+        pipe = self.r.pipeline(transaction=True)
+        pipe.delete(key)
+        pipe.srem(self._cacheidx_key(org), key)
+        for cid in ids:
+            pipe.srem(self._chunkmap_key(org, cid), key)
+        pipe.execute()
+        return True
 
     def invalidate_chunks(self, org, chunk_ids) -> List[str]:
         dropped: set = set()

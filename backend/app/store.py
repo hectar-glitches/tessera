@@ -35,6 +35,14 @@ class CacheCandidate:
     chunk_ids: List[str]
     tokens_in: int = 0
     tokens_out: int = 0
+    # OrgCache role-aware fields
+    role: str = ""
+    seniority: str = ""
+    tenure: str = ""
+    min_seniority_level: int = 1
+    hit_count: int = 0
+    created_at: float = 0.0
+    last_asked_at: float = 0.0
 
 
 @dataclass
@@ -95,14 +103,74 @@ class BaseStore(ABC):
         chunk_ids: List[str],
         tokens_in: int,
         tokens_out: int,
+        role: str = "",
+        seniority: str = "",
+        tenure: str = "",
+        min_seniority_level: int = 1,
     ) -> None:
         """Atomically write the cache entry AND its reverse-index updates."""
 
     @abstractmethod
-    def search_cache(self, org: str, qvec: np.ndarray, k: int) -> List[CacheCandidate]: ...
+    def search_cache(
+        self,
+        org: str,
+        qvec: np.ndarray,
+        k: int,
+        user_level: Optional[int] = None,
+        role: Optional[str] = None,
+        tenure: Optional[str] = None,
+    ) -> List[CacheCandidate]: ...
 
     @abstractmethod
     def get_cache_entry(self, org: str, hash_: str) -> Optional[CacheCandidate]: ...
+
+    @abstractmethod
+    def bump_hit(self, org: str, hash_: str) -> None:
+        """Increment hit_count and set last_asked_at for a cache entry."""
+
+    @abstractmethod
+    def list_entries(
+        self,
+        org: str,
+        role: Optional[str] = None,
+        seniority: Optional[str] = None,
+        tenure: Optional[str] = None,
+    ) -> List[CacheCandidate]:
+        """List all cache entries (optionally filtered) for the dashboard."""
+
+    @abstractmethod
+    def update_entry(
+        self,
+        org: str,
+        hash_: str,
+        answer: Optional[str] = None,
+        min_seniority_level: Optional[int] = None,
+    ) -> Optional[CacheCandidate]:
+        """Inline edit an entry's answer and/or min_seniority_level."""
+
+    @abstractmethod
+    def delete_entry(self, org: str, hash_: str) -> bool:
+        """Remove a cache entry and clean its reverse-index membership."""
+
+    def get_trending(
+        self,
+        org: str,
+        role: Optional[str] = None,
+        seniority: Optional[str] = None,
+        tenure: Optional[str] = None,
+        limit: int = 10,
+    ) -> List[CacheCandidate]:
+        """Top entries by hit_count within a segment, respecting the hierarchy rule.
+
+        Implemented on the base via list_entries so both stores share the logic.
+        """
+        from .roles import can_view, level_for
+
+        user_level = level_for(seniority)
+        entries = self.list_entries(org, role=role, tenure=tenure)
+        visible = [e for e in entries if can_view(user_level, e.min_seniority_level)]
+        visible.sort(key=lambda e: (e.hit_count, e.last_asked_at), reverse=True)
+        return visible[:limit]
 
     @abstractmethod
     def invalidate_chunks(self, org: str, chunk_ids: List[str]) -> List[str]:
@@ -181,30 +249,84 @@ class MemoryStore(BaseStore):
 
     # cache
     def write_cache_entry(self, org, hash_, question, answer, vector, entities,
-                          chunk_ids, tokens_in, tokens_out) -> None:
+                          chunk_ids, tokens_in, tokens_out, role="", seniority="",
+                          tenure="", min_seniority_level=1) -> None:
+        now = time.time()
         self._cache.setdefault(org, {})[hash_] = CacheCandidate(
             hash=hash_, question=question, answer=answer, score=1.0,
             entities=entities, chunk_ids=chunk_ids, tokens_in=tokens_in,
-            tokens_out=tokens_out,
+            tokens_out=tokens_out, role=role, seniority=seniority, tenure=tenure,
+            min_seniority_level=int(min_seniority_level), hit_count=0,
+            created_at=now, last_asked_at=now,
         )
         self._cache_vecs.setdefault(org, {})[hash_] = vector
         rev = self._reverse.setdefault(org, {})
         for cid in chunk_ids:
             rev.setdefault(cid, set()).add(hash_)
 
-    def search_cache(self, org, qvec, k) -> List[CacheCandidate]:
+    def search_cache(self, org, qvec, k, user_level=None, role=None,
+                     tenure=None) -> List[CacheCandidate]:
+        from .roles import can_view, tenure_boost
+
         out = []
         vecs = self._cache_vecs.get(org, {})
         for h, entry in self._cache.get(org, {}).items():
+            if not can_view(user_level, entry.min_seniority_level):
+                continue
             score = embeddings.cosine(qvec, vecs[h])
-            out.append(CacheCandidate(entry.hash, entry.question, entry.answer, score,
-                                      entry.entities, entry.chunk_ids,
-                                      entry.tokens_in, entry.tokens_out))
+            ranked = score + tenure_boost(tenure, entry.tenure)
+            out.append(CacheCandidate(
+                entry.hash, entry.question, entry.answer, ranked,
+                entry.entities, entry.chunk_ids, entry.tokens_in, entry.tokens_out,
+                role=entry.role, seniority=entry.seniority, tenure=entry.tenure,
+                min_seniority_level=entry.min_seniority_level, hit_count=entry.hit_count,
+                created_at=entry.created_at, last_asked_at=entry.last_asked_at,
+            ))
         out.sort(key=lambda c: c.score, reverse=True)
         return out[:k]
 
     def get_cache_entry(self, org, hash_) -> Optional[CacheCandidate]:
         return self._cache.get(org, {}).get(hash_)
+
+    def bump_hit(self, org, hash_) -> None:
+        entry = self._cache.get(org, {}).get(hash_)
+        if entry:
+            entry.hit_count += 1
+            entry.last_asked_at = time.time()
+
+    def list_entries(self, org, role=None, seniority=None,
+                     tenure=None) -> List[CacheCandidate]:
+        out = []
+        for entry in self._cache.get(org, {}).values():
+            if role and entry.role != role:
+                continue
+            if seniority and entry.seniority != seniority:
+                continue
+            if tenure and entry.tenure != tenure:
+                continue
+            out.append(entry)
+        out.sort(key=lambda e: e.hit_count, reverse=True)
+        return out
+
+    def update_entry(self, org, hash_, answer=None,
+                     min_seniority_level=None) -> Optional[CacheCandidate]:
+        entry = self._cache.get(org, {}).get(hash_)
+        if not entry:
+            return None
+        if answer is not None:
+            entry.answer = answer
+        if min_seniority_level is not None:
+            entry.min_seniority_level = int(min_seniority_level)
+        return entry
+
+    def delete_entry(self, org, hash_) -> bool:
+        entry = self._cache.get(org, {}).pop(hash_, None)
+        self._cache_vecs.get(org, {}).pop(hash_, None)
+        if entry:
+            rev = self._reverse.get(org, {})
+            for cid in entry.chunk_ids:
+                rev.get(cid, set()).discard(hash_)
+        return entry is not None
 
     def invalidate_chunks(self, org, chunk_ids) -> List[str]:
         rev = self._reverse.get(org, {})
