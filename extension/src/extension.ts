@@ -1,9 +1,9 @@
 import * as http from "node:http";
 import * as vscode from "vscode";
 
-import { CheckResult, UserContext, checkCache, getTrending } from "./api";
+import { CheckResult, TrendingItem, UserContext, checkCache, getTrending } from "./api";
 import { extractQuestion, levelForSeniority, tenureForJoinDate } from "./helpers";
-import { popupHtml, sidebarHtml } from "./webview";
+import { SidebarState, sidebarHtml } from "./webview";
 
 let output: vscode.OutputChannel;
 let hookServer: http.Server | undefined;
@@ -14,7 +14,7 @@ function log(msg: string) {
 }
 
 function readContext(): UserContext {
-  const cfg = vscode.workspace.getConfiguration("orgcache");
+  const cfg = vscode.workspace.getConfiguration("tessera");
   return {
     serverUrl: cfg.get<string>("serverUrl", "http://localhost:8000"),
     org: cfg.get<string>("org", "acmecorp"),
@@ -25,30 +25,29 @@ function readContext(): UserContext {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-  output = vscode.window.createOutputChannel("OrgCache");
+  output = vscode.window.createOutputChannel("Tessera");
   context.subscriptions.push(output);
-  log("OrgCache activated");
+  log("Tessera activated");
 
   const ctx = readContext();
   log(`context: org=${ctx.org} role=${ctx.role} seniority=${ctx.seniority} ` +
       `(level ${levelForSeniority(ctx.seniority)}) tenure=${ctx.tenure}`);
 
-  // Trending sidebar.
-  trendingProvider = new TrendingProvider(context);
+  trendingProvider = new TrendingProvider();
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider("orgcache.trending", trendingProvider),
+    vscode.window.registerWebviewViewProvider("tessera.trending", trendingProvider, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+  );
+  vscode.commands.executeCommand("tessera.trending.focus");
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("tessera.checkSelection", () => checkSelectionCommand()),
+    vscode.commands.registerCommand("tessera.openTrending", () => trendingProvider?.refresh()),
   );
 
-  // Commands.
-  context.subscriptions.push(
-    vscode.commands.registerCommand("orgcache.checkSelection", () => checkSelectionCommand()),
-    vscode.commands.registerCommand("orgcache.openTrending", () => trendingProvider?.refresh()),
-  );
-
-  // Claude Code PreToolUse hook listener.
   startHookListener(context);
 
-  // Refresh trending every 5 minutes.
   const timer = setInterval(() => trendingProvider?.refresh(), 5 * 60 * 1000);
   context.subscriptions.push({ dispose: () => clearInterval(timer) });
 }
@@ -59,14 +58,11 @@ export function deactivate() {
 
 // ----------------------------------------------------------------- hook listener
 function startHookListener(context: vscode.ExtensionContext) {
-  const cfg = vscode.workspace.getConfiguration("orgcache");
+  const cfg = vscode.workspace.getConfiguration("tessera");
   const port = cfg.get<number>("hookPort", 7777);
 
   hookServer = http.createServer((req, res) => {
-    if (req.method !== "POST") {
-      res.writeHead(405).end();
-      return;
-    }
+    if (req.method !== "POST") { res.writeHead(405).end(); return; }
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", async () => {
@@ -77,14 +73,11 @@ function startHookListener(context: vscode.ExtensionContext) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(obj));
       };
-      if (!question) {
-        respond({ decision: "continue" });
-        return;
-      }
+      if (!question) { respond({ decision: "continue" }); return; }
       log(`hook question: ${question}`);
-      const result = await handleQuestion(question);
-      // Tell Claude Code to continue (we never block; the popup is advisory).
-      respond({ decision: "continue", orgcache: { hit: result?.decision === "hit" } });
+      const result = await queryCache(question);
+      if (result) trendingProvider?.showHit(result.checkResult, { question, count: result.count });
+      respond({ decision: "continue", tessera: { hit: !!result } });
     });
   });
 
@@ -93,86 +86,88 @@ function startHookListener(context: vscode.ExtensionContext) {
   context.subscriptions.push({ dispose: () => hookServer?.close() });
 }
 
-// --------------------------------------------------------------- core behaviors
-async function handleQuestion(question: string): Promise<CheckResult | null> {
+// --------------------------------------------------------------- core query
+async function queryCache(question: string): Promise<{ checkResult: CheckResult; count: number } | null> {
   const ctx = readContext();
-  const cfg = vscode.workspace.getConfiguration("orgcache");
+  const cfg = vscode.workspace.getConfiguration("tessera");
   const threshold = cfg.get<number>("similarityThreshold", 0.85);
 
   const result = await checkCache(ctx, question, log);
-  if (!result) return null;
-  if (result.decision === "hit" && result.similarity >= threshold) {
-    let count = 0;
-    const trending = await getTrending(ctx, log);
-    const match = trending.find((t) => t.question === result.matched_question);
-    if (match) count = match.count;
-    showPopup(result, { question, count });
-  }
-  return result;
+  if (!result || result.decision !== "hit" || result.similarity < threshold) return null;
+
+  let count = 0;
+  const trending = await getTrending(ctx, log);
+  const match = trending.find((t) => t.question === result.matched_question);
+  if (match) count = match.count;
+  return { checkResult: result, count };
 }
 
 async function checkSelectionCommand() {
   const editor = vscode.window.activeTextEditor;
   let text = editor?.document.getText(editor.selection)?.trim();
-  if (!text) {
-    text = await vscode.window.showInputBox({ prompt: "Ask OrgCache" });
-  }
+  if (!text) text = await vscode.window.showInputBox({ prompt: "Ask Tessera" });
   if (!text) return;
-  const result = await handleQuestion(text);
-  if (!result || result.decision !== "hit") {
-    vscode.window.showInformationMessage("OrgCache: no confident cached answer — ask your agent.");
-  }
+  await trendingProvider?.query(text);
 }
 
-let popupPanel: vscode.WebviewPanel | undefined;
+// --------------------------------------------------------------- sidebar view
 
-function showPopup(result: CheckResult, opts: { question: string; count?: number }) {
-  if (!popupPanel) {
-    popupPanel = vscode.window.createWebviewPanel(
-      "orgcache.popup",
-      "⚡ OrgCache",
-      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
-      { enableScripts: true, retainContextWhenHidden: true },
-    );
-    popupPanel.onDidDispose(() => (popupPanel = undefined));
-  }
-  popupPanel.webview.html = popupHtml(result, opts);
-  popupPanel.reveal(vscode.ViewColumn.Beside, true);
-
-  const sub = popupPanel.webview.onDidReceiveMessage(async (msg) => {
-    if (msg.action === "use") {
-      await vscode.env.clipboard.writeText(result.answer || "");
-      vscode.window.showInformationMessage("OrgCache: answer copied to clipboard.");
-      popupPanel?.dispose();
-    } else if (msg.action === "ask") {
-      log("user chose Ask Agent — forwarding to coding agent");
-      popupPanel?.dispose();
-    } else if (msg.action === "dismiss") {
-      log("user dismissed popup (negative signal)");
-      popupPanel?.dispose();
-    }
-  });
-  if (popupPanel) popupPanel.onDidDispose(() => sub.dispose());
-}
-
-// --------------------------------------------------------------- trending view
 class TrendingProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  private cachedItems: TrendingItem[] = [];
+  private state: SidebarState = { type: "trending" };
 
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
     view.webview.options = { enableScripts: true };
-    view.webview.onDidReceiveMessage((m) => {
-      if (m.action === "refresh") this.refresh();
+    view.webview.onDidReceiveMessage(async (m) => {
+      if (m.action === "refresh") {
+        this.state = { type: "trending" };
+        this.refresh();
+      } else if (m.action === "query") {
+        await this.query(m.text);
+      } else if (m.action === "use") {
+        if (this.state.type === "hit") {
+          await vscode.env.clipboard.writeText(this.state.result.answer || "");
+          vscode.window.showInformationMessage("Tessera: answer copied to clipboard.");
+        }
+        this.state = { type: "trending" };
+        this.render();
+      } else if (m.action === "ask" || m.action === "dismiss") {
+        if (m.action === "ask") log("user chose Ask Agent");
+        this.state = { type: "trending" };
+        this.render();
+      }
     });
     this.refresh();
   }
 
+  async query(question: string) {
+    this.state = { type: "loading", question };
+    this.render();
+    const hit = await queryCache(question);
+    if (hit) {
+      this.state = { type: "hit", result: hit.checkResult, opts: { question, count: hit.count } };
+    } else {
+      this.state = { type: "miss", question };
+    }
+    this.render();
+  }
+
+  showHit(result: CheckResult, opts: { question: string; count?: number }) {
+    this.state = { type: "hit", result, opts };
+    vscode.commands.executeCommand("tessera.trending.focus");
+    this.render();
+  }
+
   async refresh() {
-    if (!this.view) return;
     const ctx = readContext();
-    const items = await getTrending(ctx, log);
-    this.view.webview.html = sidebarHtml(items);
+    this.cachedItems = await getTrending(ctx, log);
+    if (this.state.type === "trending") this.render();
+  }
+
+  private render() {
+    if (!this.view) return;
+    this.view.webview.html = sidebarHtml(this.cachedItems, this.state);
   }
 }
