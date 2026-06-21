@@ -44,6 +44,7 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand("tessera.checkSelection", () => checkSelectionCommand()),
     vscode.commands.registerCommand("tessera.openTrending", () => trendingProvider?.refresh()),
+    vscode.commands.registerCommand("tessera.setProfile", () => setProfileCommand()),
   );
 
   startHookListener(context);
@@ -155,6 +156,32 @@ async function queryCache(question: string): Promise<{ checkResult: CheckResult;
   return { checkResult: result, count };
 }
 
+async function setProfileCommand() {
+  const ROLES = ["engineer", "designer", "pm", "devops", "manager"];
+  const LEVELS = ["junior", "mid", "senior", "staff", "principal"];
+  const cfg = vscode.workspace.getConfiguration("tessera");
+  const currentRole = cfg.get<string>("role", "engineer");
+  const currentSeniority = cfg.get<string>("seniority", "junior");
+
+  const role = await vscode.window.showQuickPick(
+    ROLES.map(r => ({ label: r, description: r === currentRole ? "current" : "" })),
+    { title: "Tessera: Select your role", placeHolder: currentRole },
+  );
+  if (!role) return;
+
+  const seniority = await vscode.window.showQuickPick(
+    LEVELS.map(s => ({ label: s, description: s === currentSeniority ? "current" : "" })),
+    { title: "Tessera: Select your seniority", placeHolder: currentSeniority },
+  );
+  if (!seniority) return;
+
+  await cfg.update("role", role.label, vscode.ConfigurationTarget.Global);
+  await cfg.update("seniority", seniority.label, vscode.ConfigurationTarget.Global);
+  log(`profile updated: role=${role.label} seniority=${seniority.label}`);
+  vscode.window.showInformationMessage(`Tessera: profile set to ${role.label} / ${seniority.label}`);
+  trendingProvider?.refresh();
+}
+
 async function checkSelectionCommand() {
   const editor = vscode.window.activeTextEditor;
   let text = editor?.document.getText(editor.selection)?.trim();
@@ -183,7 +210,9 @@ class TrendingProvider implements vscode.WebviewViewProvider {
     this.view = view;
     view.webview.options = { enableScripts: true };
     view.webview.onDidReceiveMessage(async (m) => {
-      if (m.action === "refresh") {
+      if (m.action === "setProfile") {
+        await setProfileCommand();
+      } else if (m.action === "refresh") {
         this.state = { type: "trending" };
         this.refresh();
       } else if (m.action === "query") {
@@ -247,6 +276,7 @@ class TrendingProvider implements vscode.WebviewViewProvider {
 
   private render() {
     if (!this.view) return;
-    this.view.webview.html = sidebarHtml(this.cachedItems, this.state);
+    const ctx = readContext();
+    this.view.webview.html = sidebarHtml(this.cachedItems, this.state, { role: ctx.role, seniority: ctx.seniority });
   }
 }

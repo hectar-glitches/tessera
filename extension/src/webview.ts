@@ -389,7 +389,11 @@ const BASE_STYLE = `
   .empty-text { font-size: 12px; color: var(--vscode-descriptionForeground); line-height: 1.5; }
 `;
 
-export function sidebarHtml(items: TrendingItem[], state: SidebarState = { type: "trending" }): string {
+export function sidebarHtml(
+  items: TrendingItem[],
+  state: SidebarState = { type: "trending" },
+  profile?: { role: string; seniority: string },
+): string {
   // -- search input (always shown) --
   const searchSection = `
     <div class="search-section">
@@ -481,7 +485,10 @@ export function sidebarHtml(items: TrendingItem[], state: SidebarState = { type:
   <div class="sidebar">
     <div class="sidebar-header">
       <div class="sidebar-title">${BRAND_ICON} Tessera</div>
-      <button class="refresh-btn" onclick="refresh()" title="Refresh">↻</button>
+      <div style="display:flex;align-items:center;gap:5px">
+        ${profile ? `<button class="refresh-btn" onclick="setProfile()" title="Change role / seniority" style="font-size:11px;letter-spacing:0.01em;padding:3px 7px">${esc(profile.role)} · ${esc(profile.seniority)}</button>` : ""}
+        <button class="refresh-btn" onclick="refresh()" title="Refresh">↻</button>
+      </div>
     </div>
     ${searchSection}
     ${content}
@@ -503,6 +510,8 @@ export function sidebarHtml(items: TrendingItem[], state: SidebarState = { type:
     });
 
     function send(action) { vscode.postMessage({ action }); }
+
+    function setProfile() { vscode.postMessage({ action: 'setProfile' }); }
 
     function refresh() {
       document.getElementById('q').value = '';

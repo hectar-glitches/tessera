@@ -66,6 +66,13 @@
           "type": "number",
           "default": 0.85,
           "description": "Minimum similarity to show the cache-hit popup."
+        },
+        "tessera.cacheTtlDays": {
+          "type": "number",
+          "enum": [7, 14, 30, 60, 90, 0],
+          "enumDescriptions": ["7 days", "14 days", "30 days", "60 days", "90 days", "Never expire"],
+          "default": 30,
+          "description": "How long cached entries are considered fresh. 0 = never expire."
         }
       }
     },
@@ -77,6 +84,10 @@
       {
         "command": "tessera.openTrending",
         "title": "Tessera: Refresh trending FAQs"
+      },
+      {
+        "command": "tessera.setProfile",
+        "title": "Tessera: Set my role and seniority"
       }
     ],
     "viewsContainers": {

@@ -169,6 +169,22 @@ const ENTRIES = [
 
 const LEVEL = { junior: 1, mid: 2, senior: 3, staff: 4, principal: 5 };
 
+// TTL filtering — entries are treated as cached at server start.
+// Override per-entry with a `cachedAt` ISO string if needed.
+const SERVER_START = new Date();
+const TTL_DAYS = Number(process.env.TESSERA_TTL_DAYS ?? 30);
+
+function isExpired(entry) {
+  if (TTL_DAYS === 0) return false;
+  const cachedAt = entry.cachedAt ? new Date(entry.cachedAt) : SERVER_START;
+  const ageDays = (Date.now() - cachedAt.getTime()) / 86_400_000;
+  return ageDays > TTL_DAYS;
+}
+
+function liveEntries() {
+  return ENTRIES.filter(e => !isExpired(e));
+}
+
 const readBody = (req) =>
   new Promise((resolve) => {
     let d = "";
@@ -193,7 +209,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && /\/check$/.test(url.pathname)) {
     const b = await readBody(req);
     const lvl = b.user_level ?? LEVEL[b.seniority] ?? 5;
-    const m = ENTRIES.find(
+    const m = liveEntries().find(
       (e) => e.question === b.question && e.min_seniority_level <= lvl && (!b.role || e.role === b.role),
     );
     return send(200, m
@@ -205,7 +221,7 @@ const server = http.createServer(async (req, res) => {
     const role = url.searchParams.get("role");
     const seniority = url.searchParams.get("seniority");
     const lvl = seniority ? LEVEL[seniority] : 5;
-    const items = ENTRIES
+    const items = liveEntries()
       .filter((e) => e.min_seniority_level <= lvl && (!role || e.role === role))
       .sort((a, b) => b.hit_count - a.hit_count)
       .slice(0, 10)
@@ -217,4 +233,9 @@ const server = http.createServer(async (req, res) => {
 });
 
 const port = process.env.PORT || 8000;
-server.listen(port, () => console.log(`[tessera-mock] http://localhost:${port} — ${ENTRIES.length} entries loaded`));
+server.listen(port, () => {
+  const live = liveEntries().length;
+  const ttlLabel = TTL_DAYS === 0 ? "no expiry" : `${TTL_DAYS}d TTL`;
+  console.log(`[tessera-mock] http://localhost:${port} — ${live}/${ENTRIES.length} entries live (${ttlLabel})`);
+  console.log(`  Override TTL: TESSERA_TTL_DAYS=7 node mock/server.js`);
+});
