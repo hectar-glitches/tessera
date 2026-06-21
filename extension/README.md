@@ -50,7 +50,8 @@ Tessera runs a local HTTP listener on `127.0.0.1:7778`. Add this to your Claude 
         "hooks": [
           {
             "type": "command",
-            "command": "curl -s -X POST http://127.0.0.1:7778 -H 'Content-Type: application/json' -d @-"
+            "command": "curl -s -X POST http://127.0.0.1:7778 -H 'Content-Type: application/json' -d @-",
+            "timeout": 600
           }
         ]
       }
@@ -59,7 +60,20 @@ Tessera runs a local HTTP listener on `127.0.0.1:7778`. Add this to your Claude 
 }
 ```
 
-Tessera always responds `{"decision":"continue"}` — the popup is advisory and never blocks your agent.
+How it behaves:
+
+- **Cache hit** — Tessera **pauses Claude Code** by holding the hook response open and shows the cached answer in the sidebar. The agent stays paused until you decide:
+  - **Use Answer** / **Dismiss** → Tessera responds with `permissionDecision: "deny"` and the cached answer as the reason, so Claude Code stops (no tokens spent).
+  - **Ask Agent →** ("ask anyways") → Tessera responds with `permissionDecision: "allow"` and Claude Code proceeds.
+- **Cache miss** — Tessera responds with `permissionDecision: "allow"` immediately; the agent never waits.
+
+Responses use Claude Code's `PreToolUse` hook schema, e.g.:
+
+```json
+{ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "Tessera cache hit — …" } }
+```
+
+> **Important:** set a `timeout` on the hook (seconds) that is at least as long as you want the agent to wait for your decision. The matching cap on the extension side is `tessera.hookHoldTimeoutMs` (default 10 min) — after that Tessera auto-continues the agent so nothing hangs forever.
 
 ## Commands
 

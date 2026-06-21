@@ -1,0 +1,18 @@
+{
+  "name": "@acme/db",
+  "private": true,
+  "version": "0.0.1",
+  "scripts": {
+    "migrate": "drizzle-kit migrate",
+    "reset": "tsx src/reset.ts",
+    "generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^0.9.3",
+    "drizzle-orm": "^0.31.2"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.22.7",
+    "tsx": "^4.15.5"
+  }
+}

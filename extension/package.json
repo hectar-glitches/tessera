@@ -57,6 +57,11 @@
           "default": 7778,
           "description": "Local port for the Claude Code PreToolUse hook listener."
         },
+        "tessera.hookHoldTimeoutMs": {
+          "type": "number",
+          "default": 600000,
+          "description": "How long (ms) to pause Claude Code on a cache hit while waiting for your sidebar decision before automatically continuing the agent."
+        },
         "tessera.similarityThreshold": {
           "type": "number",
           "default": 0.85,

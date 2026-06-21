@@ -59,7 +59,8 @@ export function deactivate() {
 // ----------------------------------------------------------------- hook listener
 function startHookListener(context: vscode.ExtensionContext) {
   const cfg = vscode.workspace.getConfiguration("tessera");
-  const port = cfg.get<number>("hookPort", 7777);
+  const port = cfg.get<number>("hookPort", 7778);
+  const holdTimeoutMs = cfg.get<number>("hookHoldTimeoutMs", 600000);
 
   hookServer = http.createServer((req, res) => {
     if (req.method !== "POST") { res.writeHead(405).end(); return; }
@@ -69,15 +70,67 @@ function startHookListener(context: vscode.ExtensionContext) {
       let payload: any = {};
       try { payload = body ? JSON.parse(body) : {}; } catch { /* ignore */ }
       const question = extractQuestion(payload);
+
+      let answered = false;
       const respond = (obj: any) => {
+        if (answered) return;
+        answered = true;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(obj));
       };
-      if (!question) { respond({ decision: "continue" }); return; }
+      // Let Claude Code continue running. "allow" auto-approves the tool call so
+      // the agent proceeds without re-prompting for permission.
+      const cont = () =>
+        respond({
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "allow",
+            permissionDecisionReason: "Tessera: continue",
+          },
+        });
+      // Pause/stop the agent — Claude Code receives the cached answer as the reason.
+      const block = (reason: string) =>
+        respond({
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: reason,
+          },
+        });
+
+      if (!question) { cont(); return; }
       log(`hook question: ${question}`);
+
       const result = await queryCache(question);
-      if (result) trendingProvider?.showHit(result.checkResult, { question, count: result.count });
-      respond({ decision: "continue", tessera: { hit: !!result } });
+      if (!result) {
+        // Cache miss — nothing to pause for, let the agent run.
+        cont();
+        return;
+      }
+
+      // Cache hit — hold the response open so Claude Code pauses while the user
+      // reviews the cached answer in the sidebar. The sidebar action decides:
+      //   "ask"           -> cont()    (Ask anyways: continue Claude Code)
+      //   "use"/"dismiss" -> block(...)(keep paused; user took the cached answer)
+      const answer = result.checkResult.answer || "";
+      const decide = (continueAgent: boolean) => {
+        if (continueAgent) {
+          log("hook decision: continue agent (ask anyways)");
+          cont();
+        } else {
+          log("hook decision: pause agent (used cached answer)");
+          block(`Tessera cache hit — answered from the org knowledge cache:\n\n${answer}`);
+        }
+      };
+
+      // Safety net: if the user never responds, release the connection so the
+      // socket and the agent don't hang forever.
+      const timer = setTimeout(() => {
+        if (!answered) { log("hook hold timed out — continuing agent"); cont(); }
+      }, holdTimeoutMs);
+      res.on("close", () => clearTimeout(timer));
+
+      trendingProvider?.showHookHit(result.checkResult, { question, count: result.count }, decide);
     });
   });
 
@@ -116,6 +169,15 @@ class TrendingProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private cachedItems: TrendingItem[] = [];
   private state: SidebarState = { type: "trending" };
+  // Resolver for an in-flight Claude Code hook request that is currently paused
+  // waiting on the user's decision. (true = continue agent, false = stay paused)
+  private pendingHookDecision?: (continueAgent: boolean) => void;
+
+  private resolveHook(continueAgent: boolean) {
+    const decide = this.pendingHookDecision;
+    this.pendingHookDecision = undefined;
+    decide?.(continueAgent);
+  }
 
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
@@ -131,10 +193,14 @@ class TrendingProvider implements vscode.WebviewViewProvider {
           await vscode.env.clipboard.writeText(this.state.result.answer || "");
           vscode.window.showInformationMessage("Tessera: answer copied to clipboard.");
         }
+        // Keep Claude Code paused — the user took the cached answer.
+        this.resolveHook(false);
         this.state = { type: "trending" };
         this.render();
       } else if (m.action === "ask" || m.action === "dismiss") {
         if (m.action === "ask") log("user chose Ask Agent");
+        // "ask" = ask anyways -> continue the agent. "dismiss" = stay paused.
+        this.resolveHook(m.action === "ask");
         this.state = { type: "trending" };
         this.render();
       }
@@ -158,6 +224,19 @@ class TrendingProvider implements vscode.WebviewViewProvider {
     this.state = { type: "hit", result, opts };
     vscode.commands.executeCommand("tessera.trending.focus");
     this.render();
+  }
+
+  // Cache hit originating from a Claude Code hook: show the answer AND keep a
+  // handle to the paused agent request so the sidebar buttons can resolve it.
+  showHookHit(
+    result: CheckResult,
+    opts: { question: string; count?: number },
+    decide: (continueAgent: boolean) => void,
+  ) {
+    // Resolve any stale pending request (continue it) before taking over.
+    this.resolveHook(true);
+    this.pendingHookDecision = decide;
+    this.showHit(result, opts);
   }
 
   async refresh() {

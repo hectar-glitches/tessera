@@ -1,0 +1,23 @@
+{
+  "name": "acmecorp-platform",
+  "private": true,
+  "version": "2.14.0",
+  "packageManager": "pnpm@9.4.0",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "test:e2e": "playwright test",
+    "clean": "turbo run clean",
+    "clean:all": "pnpm clean && rm -rf node_modules/.cache .turbo",
+    "db:migrate": "pnpm --filter @acme/db migrate",
+    "db:reset": "pnpm --filter @acme/db reset",
+    "trigger:dev": "pnpm --filter @acme/jobs dev",
+    "gdpr:delete": "node scripts/gdpr-delete.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.44.0",
+    "turbo": "^2.0.6",
+    "typescript": "^5.4.5"
+  }
+}
