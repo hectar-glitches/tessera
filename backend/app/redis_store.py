@@ -17,9 +17,16 @@ import numpy as np
 import redis
 from redis.commands.search.field import NumericField, TagField, TextField, VectorField
 try:
-    from redis.commands.search.index_definition import IndexDefinition, IndexType  # redis-py 4.x
+    from redis.commands.search.index_definition import IndexDefinition, IndexType
 except ImportError:
-    from redis.commands.search.commands import IndexDefinition, IndexType  # redis-py 5.x
+    try:
+        from redis.commands.search.indexDefinition import IndexDefinition, IndexType
+    except ImportError:
+        from redis.commands.search.commands import IndexDefinition
+        from enum import Enum
+        class IndexType(Enum):
+            HASH = "HASH"
+            JSON = "ON JSON"
 from redis.commands.search.query import Query
 
 from . import acl, embeddings
