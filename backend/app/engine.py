@@ -61,6 +61,8 @@ class QueryResult:
     access_level: str = "public"
     access_teams: List[str] = field(default_factory=list)
     sources: List[str] = field(default_factory=list)
+    # Label-aware TTL: absolute unix expiry of the served/written entry (0 == never).
+    expires_at: float = 0.0
 
 
 def normalize_question(q: str) -> str:
@@ -253,6 +255,7 @@ class Engine:
             access_level=entry.acl_level,
             access_teams=entry.acl_teams,
             sources=entry.chunk_ids,
+            expires_at=entry.expires_at,
         )
 
     def _check_boundary_probe(self, org, qvec, question, identity) -> None:
@@ -336,6 +339,7 @@ class Engine:
                                   tokens_spent=gen.tokens_in + gen.tokens_out)
             self._log(org, question, "miss", similarity, None, 0, 0.0, identity=identity,
                       note=f"generated via {gen.via} ({gen.model}) @ {label.level}")
+            _ttl = self.settings.cache_ttl_for(label.level)
             return QueryResult(
                 decision="miss",
                 cached=False,
@@ -350,6 +354,7 @@ class Engine:
                 access_level=label.level,
                 access_teams=label.teams,
                 sources=chunk_ids,
+                expires_at=(time.time() + _ttl) if _ttl > 0 else 0.0,
             )
         finally:
             self.store.release_lock(hkey)

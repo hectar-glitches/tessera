@@ -2,7 +2,8 @@
 
 **Token-aware FAQ infrastructure for orgs.** A semantic-cache-backed RAG assistant
 that lets an org safely cut LLM API costs while serving accurate, source-grounded
-answers. Demoed as **Ask Ddoski** for AI Hackathon 2026.
+answers — and never serving one across a permission boundary. Demoed as **Ask Ddoski**
+for AI Hackathon 2026.
 
 > Semantic caching exists as developer infrastructure. Tessera turns it into a
 > budget-and-trust tool a non-technical org admin can actually own, solves the
@@ -35,13 +36,21 @@ query -> embed -> extract entities -> Redis hybrid search (vector KNN + entity t
            low sim / no match            -> CACHE MISS (call Claude, store entry)
 ```
 
-Every request is logged with its decision path, tokens saved, and dollars saved.
+Every request is logged with its decision path, tokens saved, and dollars saved. Both
+the cache search and RAG retrieval are access-scoped to the requester's identity (see
+[IAM / access-control governance](#iam--access-control-governance)), so neither a hit
+nor a suggestion can leak across a permission boundary.
 
 ## Stack
 
 - **Backend:** FastAPI, redis-py (Redis Stack / RediSearch), Anthropic SDK,
   sentence-transformers (local embeddings, with a deterministic fallback).
-- **Frontend:** React + Vite + Tailwind.
+- **Governance:** an IAM/RBAC layer (clearance levels + team boundaries) on top of the
+  role/seniority/tenure segmentation, with sensitivity-tiered cache TTLs.
+- **Observability:** Sentry (tracing + AI-governance issues) and Arize (decision logs),
+  both optional and no-op without keys.
+- **Clients:** a React + Vite + Tailwind dashboard, a VS Code extension, and a Node MCP
+  server.
 - **Storage:** Redis Stack — vector search, the chunk-to-cache-key reverse index
   (Redis beyond caching), and Lua-atomic writes.
 
@@ -131,13 +140,77 @@ org's shared cache serves *role-appropriate* answers.
 **Tests:** `cd backend && python -m scripts.smoke` (legacy) and `pytest -q`
 (role-filtering suite in `backend/tests/`).
 
-## Observability (Arize)
+## IAM / access-control governance
+
+Beyond entity-safety, Tessera enforces a second boundary: **who is allowed to see an
+answer.** A shared org cache is dangerous if an answer generated from a manager-only or
+finance-only source can be served to anyone who asks a similar question.
+`backend/app/acl.py` is the governance core.
+
+**Two axes**, declared per source section via an inline directive
+(`<!-- acl: level=manager team=finance -->`):
+
+- **level** — an ordered clearance tier: `public < employee < manager < exec`.
+- **team** — an unordered cache-sharing boundary (teammates share; `exec` sees across
+  all teams).
+
+A cached answer **inherits the most-restrictive label** of the chunks it was generated
+from (`acl.combine`). A requester — an `Identity` (`user` / `team` / `level`), sent as
+the optional `identity` field on `/query` — may see an entry iff
+`identity.level >= entry.level` **and** (`entry` has no team restriction, the identity's
+team is allowed, or the identity is `exec`).
+
+Enforced on **both cache hits and suggestions**, and RAG retrieval is itself
+access-scoped — so a low-clearance user can never be served, *see the existence of*, or
+have an answer grounded on, content above their clearance.
+
+**Demo personas** (`GET /api/identities`): Maya (intern), Leo (engineer), Raj (eng
+manager), Priya (finance manager), Dana (CEO) — the intern-vs-CEO and same-team-sharing
+story.
+
+## Label-aware cache TTL
+
+Cache entries expire on a sensitivity-tiered schedule (`config.cache_ttl_for`): the
+more restrictive an answer's ACL level, the sooner it expires. Correctness on source
+edits is handled event-driven by the reverse-index invalidation; these TTLs are a
+*risk ceiling* that bounds staleness and the blast radius of any mislabel.
+
+| Level | TTL |
+|-------|-----|
+| `public` | 7 days |
+| `employee` | 24 hours |
+| `manager` | 1 hour |
+| `exec` | 15 minutes |
+
+The served/written entry's absolute expiry is surfaced as `expires_at` on the query
+response; `0` disables expiry for a tier.
+
+## Observability
+
+### Arize
 
 Every cache decision is logged via `backend/app/arize_logger.py` with its similarity,
 role, seniority, tokens saved, and latency. Set `ARIZE_API_KEY` + `ARIZE_SPACE_KEY` to
 ship records to Arize; without them, decisions are logged as structured JSON lines to
 stdout (prefixed `ARIZE_LOG`) so the pipeline stays demoable offline. The logger never
 raises into the request path.
+
+### Sentry — the silent-failure thesis
+
+An LLM's worst failures never throw: a confident wrong answer, a cache hit that crosses
+a permission boundary, an ungrounded hallucination, and a runaway bill all return HTTP
+200. `backend/app/telemetry.py` turns those *silent, semantic* failures into first-class
+Sentry signals:
+
+- **Traces** — every `/query` is a transaction; `ai.embed -> cache.search ->
+  rag.retrieve -> llm.generate` are child spans carrying similarity, tokens, and $ cost.
+- **Governance issues** — `ACL_DENIAL` (denied an unauthorized `accept_hash`),
+  `NEAR_MISS` (entity-conflict suggest), `UNGROUNDED_ANSWER` (RAG top below the floor),
+  and `BOUNDARY_PROBE` (N attempts at gated content within a sliding window) are raised
+  as grouped, fingerprinted issues tagged by `team` / `clearance`.
+
+Everything is a no-op unless `SENTRY_DSN` is set, and every SDK call is defensively
+wrapped so it can never break a request. `/api/health` exposes `sentry_enabled`.
 
 ## MCP server
 
@@ -159,6 +232,32 @@ MCP-compatible agent (Claude Code, Cursor, Devin, …). Tools: `check_cache`,
 
 See `mcp-server/README.md` for details and `npm test` (boots a mock backend).
 
-## Track
+## VS Code extension
 
-Submitted under **Ddoski's Toolbox** (single main track).
+`extension/` is a TypeScript VS Code extension that intercepts a question before it
+hits your coding agent, checks the org cache filtered by role/seniority/tenure (via the
+`/check` alias of `/query`), and shows the answer in a popup — plus a trending-FAQ
+sidebar for your segment. It also runs a local Claude Code PreToolUse hook listener and
+works fully against a bundled mock backend (`npm run mock`). See `extension/README.md`.
+
+## Built with Devin
+
+`devin/` is the orchestration package that built OrgCache as four parallel,
+context-isolated Devin sessions against a frozen `api-contract.md`, merged in dependency
+order per `coordinator.md`. See `devin/README.md`.
+
+## Deployment
+
+See `DEPLOYMENT.md` for hosting the backend (PaaS, `$PORT` + `CORS_ORIGINS`) and the
+dashboard.
+
+## Tracks
+
+The build demonstrates three prize angles:
+
+- **Redis (beyond caching)** — vector KNN with an ACL + segment prefilter, the
+  chunk→cache-key reverse index for event-driven invalidation, and Lua-atomic writes.
+- **Sentry** — silent/semantic AI failures (above) as first-class issues and traces.
+- **Cognition** — built with Devin (`devin/`).
+
+Submitted under **Ddoski's Toolbox**.
