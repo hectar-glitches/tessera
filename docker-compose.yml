@@ -1,0 +1,12 @@
+services:
+  redis:
+    image: redis/redis-stack:7.2.0-v9
+    container_name: tessera-redis
+    ports:
+      - "6379:6379"   # Redis
+      - "8001:8001"   # RedisInsight UI
+    volumes:
+      - tessera-redis-data:/data
+
+volumes:
+  tessera-redis-data:

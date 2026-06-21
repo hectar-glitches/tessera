@@ -1,0 +1,122 @@
+[
+  {
+    "bucket": "paraphrase",
+    "reference": "What time is Saturday lunch served?",
+    "probe": "When is lunch on Saturday?",
+    "expected_match": true
+  },
+  {
+    "bucket": "paraphrase",
+    "reference": "How big can my team be?",
+    "probe": "What is the maximum team size?",
+    "expected_match": true
+  },
+  {
+    "bucket": "paraphrase",
+    "reference": "What is the prize for Ddoski's Toolbox?",
+    "probe": "How much do I win in the Ddoski's Toolbox track?",
+    "expected_match": true
+  },
+  {
+    "bucket": "paraphrase",
+    "reference": "When is the submission deadline?",
+    "probe": "What time do projects have to be submitted by?",
+    "expected_match": true
+  },
+  {
+    "bucket": "paraphrase",
+    "reference": "Who are the sponsors of the hackathon?",
+    "probe": "Which companies are sponsoring the event?",
+    "expected_match": true
+  },
+  {
+    "bucket": "near-miss-by-entity",
+    "reference": "What time is Saturday lunch served?",
+    "probe": "What time is Sunday lunch served?",
+    "expected_match": false
+  },
+  {
+    "bucket": "near-miss-by-entity",
+    "reference": "What is the prize for Ddoski's Lab?",
+    "probe": "What is the prize for Ddoski's Toolbox?",
+    "expected_match": false
+  },
+  {
+    "bucket": "near-miss-by-entity",
+    "reference": "When is Saturday dinner served?",
+    "probe": "When is Saturday breakfast served?",
+    "expected_match": false
+  },
+  {
+    "bucket": "near-miss-by-entity",
+    "reference": "Can my team have 4 members?",
+    "probe": "Can my team have 5 members?",
+    "expected_match": false
+  },
+  {
+    "bucket": "near-miss-by-entity",
+    "reference": "What does Anthropic provide to teams?",
+    "probe": "What does Vercel provide to teams?",
+    "expected_match": false
+  },
+  {
+    "bucket": "near-miss-by-entity",
+    "reference": "Is there brunch on Sunday?",
+    "probe": "Is there brunch on Saturday?",
+    "expected_match": false
+  },
+  {
+    "bucket": "same-entity-different-intent",
+    "reference": "What is the prize for Ddoski's Toolbox?",
+    "probe": "How do I qualify for the Ddoski's Toolbox track?",
+    "expected_match": false
+  },
+  {
+    "bucket": "same-entity-different-intent",
+    "reference": "What time is Saturday lunch served?",
+    "probe": "Where is Saturday lunch served?",
+    "expected_match": false
+  },
+  {
+    "bucket": "same-entity-different-intent",
+    "reference": "What does Anthropic provide to teams?",
+    "probe": "Why is Anthropic sponsoring the hackathon?",
+    "expected_match": false
+  },
+  {
+    "bucket": "same-entity-different-intent",
+    "reference": "When is the Sunday closing ceremony?",
+    "probe": "What happens at the Sunday closing ceremony?",
+    "expected_match": false
+  },
+  {
+    "bucket": "unrelated",
+    "reference": "What time is Saturday lunch served?",
+    "probe": "What is the WiFi password?",
+    "expected_match": false
+  },
+  {
+    "bucket": "unrelated",
+    "reference": "What is the prize for Ddoski's Toolbox?",
+    "probe": "Where are the quiet rooms?",
+    "expected_match": false
+  },
+  {
+    "bucket": "unrelated",
+    "reference": "How big can my team be?",
+    "probe": "When does hacking open on Saturday?",
+    "expected_match": false
+  },
+  {
+    "bucket": "unrelated",
+    "reference": "Who are the sponsors of the hackathon?",
+    "probe": "What is the venue address?",
+    "expected_match": false
+  },
+  {
+    "bucket": "unrelated",
+    "reference": "When is the submission deadline?",
+    "probe": "Is there a late-night snack bar?",
+    "expected_match": false
+  }
+]
