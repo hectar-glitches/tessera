@@ -24,6 +24,7 @@ from redis.commands.search.query import Query
 
 from . import acl, embeddings
 from .acl import Identity
+from .config import get_settings
 from .store import BaseStore, CacheCandidate, Chunk, ChunkHit, LogEntry
 
 INDEX_NAME = "tessera:idx:v3"  # carries OrgCache role fields + RBAC acl_level/acl_team
@@ -235,6 +236,7 @@ class RedisStore(BaseStore):
         cache_key = self._cache_key(org, hash_)
         cacheidx = self._cacheidx_key(org)
         now = time.time()
+        ttl = get_settings().cache_ttl_for(acl_level)
         fields = {
             "org": org,
             "doctype": "cache",
@@ -252,6 +254,7 @@ class RedisStore(BaseStore):
             "hit_count": "0",
             "created_at": str(now),
             "last_asked_at": str(now),
+            "expires_at": str(now + ttl if ttl > 0 else 0.0),
             "acl_level": acl.level_rank(acl_level),
             "acl_team": _enc_team(acl_teams),
             "vector": _to_bytes(vector),
@@ -263,11 +266,15 @@ class RedisStore(BaseStore):
         keys = [cache_key, cacheidx] + [self._chunkmap_key(org, c) for c in chunk_ids]
         argv = [str(len(fields))] + flat
         self.r.evalsha(self._write_sha, len(keys), *keys, *argv)
+        # Native key expiry IS the risk ceiling: when it fires the hash vanishes from
+        # search/get for free. The chunkmap reverse-index self-heals on next invalidate.
+        if ttl > 0:
+            self.r.expire(cache_key, ttl)
 
     _CACHE_FIELDS = ("hash", "question", "answer", "entities", "chunk_ids",
                      "tokens_in", "tokens_out", "role", "seniority", "tenure",
                      "min_seniority_level", "hit_count", "created_at", "last_asked_at",
-                     "acl_level", "acl_team")
+                     "expires_at", "acl_level", "acl_team")
 
     def _doc_to_candidate(self, doc) -> CacheCandidate:
         ents = doc.entities.split(ENT_SEP) if getattr(doc, "entities", "") else []
@@ -289,6 +296,7 @@ class RedisStore(BaseStore):
             hit_count=int(getattr(doc, "hit_count", 0) or 0),
             created_at=float(getattr(doc, "created_at", 0) or 0),
             last_asked_at=float(getattr(doc, "last_asked_at", 0) or 0),
+            expires_at=float(getattr(doc, "expires_at", 0) or 0),
             acl_level=acl.rank_to_name(int(getattr(doc, "acl_level", 0) or 0)),
             acl_teams=_dec_team(getattr(doc, "acl_team", "")),
         )
@@ -343,6 +351,7 @@ class RedisStore(BaseStore):
             hit_count=int(d.get("hit_count", 0) or 0),
             created_at=float(d.get("created_at", 0) or 0),
             last_asked_at=float(d.get("last_asked_at", 0) or 0),
+            expires_at=float(d.get("expires_at", 0) or 0),
             acl_level=acl.rank_to_name(int(d.get("acl_level", 0) or 0)),
             acl_teams=_dec_team(d.get("acl_team", "")),
         )
@@ -355,11 +364,20 @@ class RedisStore(BaseStore):
 
     def bump_hit(self, org, hash_) -> None:
         key = self._cache_key(org, hash_)
-        if self.r.exists(key):
-            pipe = self.r.pipeline()
-            pipe.hincrby(key, "hit_count", 1)
-            pipe.hset(key, "last_asked_at", str(time.time()))
-            pipe.execute()
+        if not self.r.exists(key):
+            return
+        now = time.time()
+        # Sliding refresh: extend the label-aware TTL on every hit so hot answers stay
+        # warm and only cold ones age out.
+        level = acl.rank_to_name(int(self.r.hget(key, "acl_level") or 0))
+        ttl = get_settings().cache_ttl_for(level)
+        pipe = self.r.pipeline()
+        pipe.hincrby(key, "hit_count", 1)
+        pipe.hset(key, "last_asked_at", str(now))
+        if ttl > 0:
+            pipe.hset(key, "expires_at", str(now + ttl))
+            pipe.expire(key, ttl)
+        pipe.execute()
 
     def _iter_cache_keys(self, org):
         cursor = 0
