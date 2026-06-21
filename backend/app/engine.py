@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from . import acl, embeddings, entities
+from . import acl, embeddings, entities, telemetry
 from .acl import Identity, Label
 from .config import get_settings
 from .llm import get_llm
@@ -122,8 +122,16 @@ class Engine:
         compress: bool = True,
     ) -> QueryResult:
         identity = identity or Identity()
-        qvec = embeddings.embed(question)
+        telemetry.set_identity(identity)
+        with telemetry.span("ai.embed", "embed question") as _sp:
+            qvec = embeddings.embed(question)
+            telemetry.set_span_data(_sp, dims=len(qvec))
         qents = entities.extract(question)
+
+        # Governance: runs on every query (hit OR miss). The unfiltered global top is
+        # the best match over ALL sources; if it's gated for this identity, then no
+        # chunk they're allowed to see outranked it -> they're reaching above clearance.
+        self._check_boundary_probe(org, qvec, question, identity)
 
         # User accepted a suggested prior answer -> serve it (only if still authorized).
         if accept_hash:
@@ -131,11 +139,19 @@ class Engine:
             if entry and acl.can_access(identity, entry.acl_level, entry.acl_teams):
                 return self._serve_hit(org, question, entry, identity, similarity=1.0,
                                        note="user-selected suggestion")
+            if entry is not None:  # entry exists, but this identity is not authorized
+                telemetry.capture_governance_event(
+                    "ACL_DENIAL", identity, question,
+                    required_level=entry.acl_level, required_teams=entry.acl_teams,
+                    via="accept_hash")
 
         # Cache search is access-scoped: candidates the identity may not see never
         # appear here, so neither hits NOR suggestions can leak across boundaries.
-        candidates = self.store.search_cache(org, qvec, TOP_K, identity)
-        best = candidates[0] if candidates else None
+        with telemetry.span("cache.search", "access-scoped vector search") as _sp:
+            candidates = self.store.search_cache(org, qvec, TOP_K, identity)
+            best = candidates[0] if candidates else None
+            telemetry.set_span_data(_sp, candidates=len(candidates),
+                                    top_similarity=round(best.score, 4) if best else 0.0)
 
         if not force_generate and best is not None:
             match = entities.entity_match(qents, best.entities)
@@ -152,6 +168,10 @@ class Engine:
                     sugg.append(Suggestion(c.hash, c.question, round(c.score, 4),
                                            conflict, cats))
                 self.store.bump_stats(org, suggests=1)
+                telemetry.tag_decision("suggest", identity.level)
+                telemetry.capture_governance_event(
+                    "NEAR_MISS", identity, question,
+                    top_similarity=round(best.score, 4), matched=best.question)
                 self._log(org, question, "suggest", best.score, None, 0, 0.0,
                           identity=identity, note="surfaced close matches")
                 return QueryResult(
@@ -175,6 +195,9 @@ class Engine:
         saved_tokens = entry.tokens_in + entry.tokens_out
         saved_usd = _dollars(entry.tokens_in, entry.tokens_out)
         self.store.bump_stats(org, hits=1, tokens_saved=saved_tokens, saved_usd=saved_usd)
+        telemetry.tag_decision("hit", entry.acl_level)
+        telemetry.breadcrumb("cache.hit", "served from cache",
+                             access_level=entry.acl_level, saved_usd=round(saved_usd, 6))
         self._log(org, question, "hit", similarity, entry.question, saved_tokens,
                   saved_usd, identity=identity, note=note)
         return QueryResult(
@@ -192,13 +215,27 @@ class Engine:
             sources=entry.chunk_ids,
         )
 
+    def _check_boundary_probe(self, org, qvec, question, identity) -> None:
+        if identity.is_exec:
+            return
+        glob = self.store.search_chunks(org, qvec, 1)  # unfiltered global top
+        if (glob and glob[0].score >= self.settings.sim_suggest
+                and not acl.can_access(identity, glob[0].acl_level, glob[0].acl_teams)):
+            telemetry.note_boundary_attempt(org, identity, question, glob[0])
+
     def _generate(self, org, question, qvec, qents, identity, compress, similarity) -> QueryResult:
         # RAG retrieval is itself access-scoped: a low-clearance user's answer can only
         # ever be grounded on chunks they're allowed to read.
-        chunk_hits = self.store.search_chunks(org, qvec, RAG_K, identity)
+        with telemetry.span("rag.retrieve", "access-scoped retrieval") as _sp:
+            chunk_hits = self.store.search_chunks(org, qvec, RAG_K, identity)
+            telemetry.set_span_data(_sp, chunks=len(chunk_hits),
+                                    top=round(chunk_hits[0].score, 4) if chunk_hits else 0.0)
         top = chunk_hits[0].score if chunk_hits else 0.0
         if not chunk_hits or top < RAG_FLOOR:
             self.store.bump_stats(org, misses=1)
+            telemetry.tag_decision("miss", identity.level)
+            telemetry.capture_governance_event(
+                "UNGROUNDED_ANSWER", identity, question, top_score=round(top, 4))
             self._log(org, question, "miss", similarity, None, 0, 0.0, identity=identity,
                       note="no accessible source")
             return QueryResult(
@@ -228,9 +265,14 @@ class Engine:
             if compress:
                 contexts = _compress(question, contexts)
             llm = get_llm()
-            gen = llm.generate(question, contexts, simple=_is_simple(question))
+            with telemetry.span("llm.generate", "generate grounded answer") as _sp:
+                gen = llm.generate(question, contexts, simple=_is_simple(question))
+                telemetry.set_span_data(_sp, model=gen.model, via=gen.via,
+                                        tokens_in=gen.tokens_in, tokens_out=gen.tokens_out)
 
             spent_usd = _dollars(gen.tokens_in, gen.tokens_out)
+            telemetry.record_cost(gen.tokens_in, gen.tokens_out, spent_usd)
+            telemetry.tag_decision("miss", label.level)
             chunk_ids = [h.chunk_id for h in used]
             self.store.write_cache_entry(
                 org=org,

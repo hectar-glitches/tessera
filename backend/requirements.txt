@@ -9,3 +9,6 @@ python-dotenv==1.0.1
 # Optional but recommended for real semantic quality. If absent, a hashed
 # fallback embedder is used automatically.
 sentence-transformers==3.1.1
+# Observability. Telemetry is a no-op unless SENTRY_DSN is set, so this stays
+# optional at runtime even though it's pinned here.
+sentry-sdk[fastapi]==2.18.0

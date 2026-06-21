@@ -31,6 +31,16 @@ class Settings(BaseSettings):
     # Default monthly budget per org (USD) used by the dashboard budget bar
     default_budget_usd: float = 50.0
 
+    # Sentry — observability for the cognition pipeline + AI-governance events.
+    # Leave SENTRY_DSN empty to disable: all telemetry calls become no-ops.
+    sentry_dsn: str = ""
+    sentry_environment: str = "development"
+    sentry_traces_sample_rate: float = 1.0
+    sentry_profiles_sample_rate: float = 0.0
+    # Boundary-probe alerting: N attempts on gated content within the window -> issue.
+    probe_window_seconds: int = 120
+    probe_threshold: int = 3
+
 
 @lru_cache
 def get_settings() -> Settings:

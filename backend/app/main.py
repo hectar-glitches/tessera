@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import acl, embeddings, eval as eval_mod, ingest as ingest_mod
+from . import acl, embeddings, eval as eval_mod, ingest as ingest_mod, telemetry
 from .config import get_settings
 from .engine import Engine
 from .llm import get_llm
@@ -29,6 +29,8 @@ DEMO_IDENTITIES = [
     {"user": "Priya", "role": "Finance Manager", "team": "finance", "level": "manager"},
     {"user": "Dana", "role": "CEO", "team": "exec", "level": "exec"},
 ]
+
+telemetry.init()
 
 app = FastAPI(title="Tessera", version="1.0.0")
 app.add_middleware(
@@ -51,6 +53,7 @@ def health():
         "store_backend": store.backend,
         "embedding_backend": embeddings.backend_name(),
         "llm_available": get_llm().available,
+        "sentry_enabled": telemetry.enabled(),
     }
 
 
