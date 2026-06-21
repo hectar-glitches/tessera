@@ -79,7 +79,11 @@ class RedisStore(BaseStore):
     backend = "redis"
 
     def __init__(self, url: str, default_budget: float = 50.0):
-        self.r = redis.Redis.from_url(url)
+        # Bounded timeouts: a slow/unreachable endpoint must fail fast so get_store()
+        # can fall back to the in-memory store instead of hanging the whole app.
+        self.r = redis.Redis.from_url(
+            url, socket_connect_timeout=10, socket_timeout=10
+        )
         self.default_budget = default_budget
         self.dim = embeddings.get_dim()
         self._write_sha: Optional[str] = None
