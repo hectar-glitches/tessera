@@ -271,7 +271,7 @@ class RedisStore(BaseStore):
             flat.append(fk)
             flat.append(fv)
         keys = [cache_key, cacheidx] + [self._chunkmap_key(org, c) for c in chunk_ids]
-        argv = [str(len(fields))] + flat
+        argv = [str(len(flat))] + flat
         self.r.evalsha(self._write_sha, len(keys), *keys, *argv)
         # Native key expiry IS the risk ceiling: when it fires the hash vanishes from
         # search/get for free. The chunkmap reverse-index self-heals on next invalidate.
@@ -340,7 +340,9 @@ class RedisStore(BaseStore):
         return v.decode() if isinstance(v, bytes) else v
 
     def _hash_to_candidate(self, raw: dict) -> CacheCandidate:
-        d = {self._dec(k): self._dec(v) for k, v in raw.items()}
+        # Skip the vector field — it's binary and not needed for listing/editing.
+        d = {self._dec(k): self._dec(v) for k, v in raw.items()
+             if self._dec(k) != "vector"}
         ents = d.get("entities", "").split(ENT_SEP) if d.get("entities") else []
         return CacheCandidate(
             hash=d.get("hash", ""),
