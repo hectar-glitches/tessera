@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List
 
-from . import embeddings, entities
+from . import acl, embeddings, entities
 from .store import BaseStore, Chunk
 
 
@@ -41,12 +41,19 @@ def chunk_markdown(doc: str) -> List[Dict[str, str]]:
 
     def flush():
         nonlocal cur_lines, cur_title
-        body = "\n".join(cur_lines).strip()
+        raw = "\n".join(cur_lines).strip()
+        label = acl.parse_directive(raw) or acl.Label()
+        body = acl.strip_directive(raw)
         if body:
             base = _slug(cur_title)
             seen[base] = seen.get(base, 0) + 1
             cid = base if seen[base] == 1 else f"{base}-{seen[base]}"
-            chunks.append({"chunk_id": cid, "text": f"{cur_title}\n{body}".strip()})
+            chunks.append({
+                "chunk_id": cid,
+                "text": f"{cur_title}\n{body}".strip(),
+                "acl_level": label.level,
+                "acl_teams": label.teams,
+            })
         cur_lines = []
 
     for line in lines:
@@ -69,11 +76,15 @@ def ingest_document(store: BaseStore, org: str, doc: str) -> IngestResult:
     vectors = embeddings.embed_many(texts) if texts else []
 
     for c, vec in zip(raw_chunks, vectors):
-        h = hashlib.sha256(c["text"].encode()).hexdigest()[:16]
+        # Hash includes the ACL label so relabelling a section invalidates its cache.
+        h = hashlib.sha256(
+            f"{c['text']}|{c['acl_level']}|{','.join(c['acl_teams'])}".encode()
+        ).hexdigest()[:16]
         ents = entities.extract(c["text"])
         new_hashes[c["chunk_id"]] = h
         chunk_objs.append(
-            Chunk(chunk_id=c["chunk_id"], text=c["text"], hash=h, entities=ents, vector=vec)
+            Chunk(chunk_id=c["chunk_id"], text=c["text"], hash=h, entities=ents,
+                  vector=vec, acl_level=c["acl_level"], acl_teams=c["acl_teams"])
         )
 
     changed = [cid for cid, h in new_hashes.items() if prev_hashes.get(cid) != h]

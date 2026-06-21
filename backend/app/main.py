@@ -12,7 +12,15 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import embeddings, eval as eval_mod, ingest as ingest_mod, roles, seed as seed_mod
+from . import (
+    acl,
+    embeddings,
+    eval as eval_mod,
+    ingest as ingest_mod,
+    roles,
+    seed as seed_mod,
+    telemetry,
+)
 from .config import get_settings
 from .engine import Engine
 from .llm import get_llm
@@ -26,6 +34,17 @@ from .models import (
 from .store import get_store
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+# Demo personas for the IAM story (intern-vs-CEO + same-team sharing).
+DEMO_IDENTITIES = [
+    {"user": "Maya", "role": "Intern", "team": "engineering", "level": "employee"},
+    {"user": "Leo", "role": "Engineer", "team": "engineering", "level": "employee"},
+    {"user": "Raj", "role": "Eng Manager", "team": "engineering", "level": "manager"},
+    {"user": "Priya", "role": "Finance Manager", "team": "finance", "level": "manager"},
+    {"user": "Dana", "role": "CEO", "team": "exec", "level": "exec"},
+]
+
+telemetry.init()
 
 app = FastAPI(title="Tessera", version="1.0.0")
 # Origins come from CORS_ORIGINS (comma-separated). Defaults to "*" for local dev;
@@ -50,6 +69,7 @@ def health():
         "store_backend": store.backend,
         "embedding_backend": embeddings.backend_name(),
         "llm_available": get_llm().available,
+        "sentry_enabled": telemetry.enabled(),
     }
 
 
@@ -89,6 +109,11 @@ def get_guide(org: str):
     return {"document": (DATA_DIR / "ask_ddoski_guide.md").read_text()}
 
 
+@app.get("/api/identities")
+def identities():
+    return {"identities": DEMO_IDENTITIES, "levels": list(acl.LEVELS.keys())}
+
+
 def _validate_segment(req: QueryRequest) -> None:
     if not roles.is_valid_role(req.role):
         raise HTTPException(status_code=400, detail={"error": f"invalid role: {req.role}"})
@@ -104,9 +129,11 @@ def _run_query(org: str, req: QueryRequest) -> QueryResponse:
     if not req.question.strip():
         raise HTTPException(status_code=400, detail={"error": "empty question"})
     _validate_segment(req)
+    identity = acl.Identity.from_dict(req.identity.model_dump() if req.identity else None)
     result = _engine().query(
         org=org,
         question=req.question,
+        identity=identity,
         accept_hash=req.accept_hash,
         force_generate=req.force_generate,
         role=req.role,

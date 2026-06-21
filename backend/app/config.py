@@ -36,6 +36,16 @@ class Settings(BaseSettings):
     arize_space_key: str = ""
     arize_model_id: str = "orgcache-decisions"
 
+    # Sentry — observability for the cognition pipeline + AI-governance events.
+    # Leave SENTRY_DSN empty to disable: all telemetry calls become no-ops.
+    sentry_dsn: str = ""
+    sentry_environment: str = "development"
+    sentry_traces_sample_rate: float = 1.0
+    sentry_profiles_sample_rate: float = 0.0
+    # Boundary-probe alerting: N attempts on gated content within the window -> issue.
+    probe_window_seconds: int = 120
+    probe_threshold: int = 3
+
     # CORS — comma-separated list of allowed origins. Defaults to "*" (open) for local
     # dev; set CORS_ORIGINS in production to lock down to the dashboard URL(s).
     cors_origins: str = "*"

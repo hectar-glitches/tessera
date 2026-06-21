@@ -14,7 +14,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from . import embeddings
+from . import acl, embeddings
+from .acl import Identity
 
 
 @dataclass
@@ -23,6 +24,8 @@ class ChunkHit:
     text: str
     score: float
     entities: List[str]
+    acl_level: str = "public"
+    acl_teams: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -43,6 +46,9 @@ class CacheCandidate:
     hit_count: int = 0
     created_at: float = 0.0
     last_asked_at: float = 0.0
+    # RBAC access-control fields
+    acl_level: str = "public"
+    acl_teams: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -52,6 +58,8 @@ class Chunk:
     hash: str
     entities: List[str]
     vector: np.ndarray
+    acl_level: str = "public"
+    acl_teams: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -64,6 +72,8 @@ class LogEntry:
     tokens_saved: int
     dollars_saved: float
     note: str = ""
+    actor: str = ""
+    access: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -88,7 +98,8 @@ class BaseStore(ABC):
     def replace_chunks(self, org: str, chunks: List[Chunk]) -> None: ...
 
     @abstractmethod
-    def search_chunks(self, org: str, qvec: np.ndarray, k: int) -> List[ChunkHit]: ...
+    def search_chunks(self, org: str, qvec: np.ndarray, k: int,
+                      identity: Optional[Identity] = None) -> List[ChunkHit]: ...
 
     # ----- cache -----
     @abstractmethod
@@ -107,6 +118,8 @@ class BaseStore(ABC):
         seniority: str = "",
         tenure: str = "",
         min_seniority_level: int = 1,
+        acl_level: str = "public",
+        acl_teams: Optional[List[str]] = None,
     ) -> None:
         """Atomically write the cache entry AND its reverse-index updates."""
 
@@ -119,6 +132,7 @@ class BaseStore(ABC):
         user_level: Optional[int] = None,
         role: Optional[str] = None,
         tenure: Optional[str] = None,
+        identity: Optional[Identity] = None,
     ) -> List[CacheCandidate]: ...
 
     @abstractmethod
@@ -239,18 +253,21 @@ class MemoryStore(BaseStore):
     def replace_chunks(self, org: str, chunks: List[Chunk]) -> None:
         self._chunks[org] = {c.chunk_id: c for c in chunks}
 
-    def search_chunks(self, org: str, qvec: np.ndarray, k: int) -> List[ChunkHit]:
+    def search_chunks(self, org, qvec, k, identity=None) -> List[ChunkHit]:
         hits = []
         for c in self._chunks.get(org, {}).values():
+            if identity and not acl.can_access(identity, c.acl_level, c.acl_teams):
+                continue
             hits.append(ChunkHit(c.chunk_id, c.text, embeddings.cosine(qvec, c.vector),
-                                 c.entities))
+                                 c.entities, c.acl_level, c.acl_teams))
         hits.sort(key=lambda h: h.score, reverse=True)
         return hits[:k]
 
     # cache
     def write_cache_entry(self, org, hash_, question, answer, vector, entities,
                           chunk_ids, tokens_in, tokens_out, role="", seniority="",
-                          tenure="", min_seniority_level=1) -> None:
+                          tenure="", min_seniority_level=1, acl_level="public",
+                          acl_teams=None) -> None:
         now = time.time()
         self._cache.setdefault(org, {})[hash_] = CacheCandidate(
             hash=hash_, question=question, answer=answer, score=1.0,
@@ -258,6 +275,7 @@ class MemoryStore(BaseStore):
             tokens_out=tokens_out, role=role, seniority=seniority, tenure=tenure,
             min_seniority_level=int(min_seniority_level), hit_count=0,
             created_at=now, last_asked_at=now,
+            acl_level=acl_level, acl_teams=acl_teams or [],
         )
         self._cache_vecs.setdefault(org, {})[hash_] = vector
         rev = self._reverse.setdefault(org, {})
@@ -265,13 +283,17 @@ class MemoryStore(BaseStore):
             rev.setdefault(cid, set()).add(hash_)
 
     def search_cache(self, org, qvec, k, user_level=None, role=None,
-                     tenure=None) -> List[CacheCandidate]:
+                     tenure=None, identity=None) -> List[CacheCandidate]:
         from .roles import can_view, tenure_boost
 
         out = []
         vecs = self._cache_vecs.get(org, {})
         for h, entry in self._cache.get(org, {}).items():
+            # OrgCache seniority hierarchy filter
             if not can_view(user_level, entry.min_seniority_level):
+                continue
+            # RBAC access-control filter
+            if identity and not acl.can_access(identity, entry.acl_level, entry.acl_teams):
                 continue
             score = embeddings.cosine(qvec, vecs[h])
             ranked = score + tenure_boost(tenure, entry.tenure)
@@ -281,6 +303,7 @@ class MemoryStore(BaseStore):
                 role=entry.role, seniority=entry.seniority, tenure=entry.tenure,
                 min_seniority_level=entry.min_seniority_level, hit_count=entry.hit_count,
                 created_at=entry.created_at, last_asked_at=entry.last_asked_at,
+                acl_level=entry.acl_level, acl_teams=entry.acl_teams,
             ))
         out.sort(key=lambda c: c.score, reverse=True)
         return out[:k]

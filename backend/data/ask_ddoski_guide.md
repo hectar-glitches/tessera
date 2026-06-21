@@ -80,3 +80,34 @@ opening ceremony.
 The venue is the Ddoski Innovation Center, Level 2. The WiFi network is
 "DdoskiGuest" and the password is posted at the registration desk. Quiet rooms are
 available on Level 3.
+
+## Judging Rubric Weights (Internal)
+
+<!-- acl: level=manager -->
+Internal organizer note: judges score each project on Technical Depth (40%),
+Usefulness and Craft (30%), Real-World Impact (20%), and Presentation (10%). These
+exact weightings are not shared with participants and are for organizers and judges
+only.
+
+## Engineering: Platform Infrastructure
+
+<!-- acl: level=manager team=engineering -->
+Engineering team only: the Ask Ddoski assistant runs on a Redis Stack cluster behind
+the api.ddoski.internal gateway. The on-call rotation owner holds the deploy keys, and
+rollbacks are triggered from the internal ops dashboard. Do not share infrastructure
+endpoints with participants.
+
+## Finance: Sponsor Payment Schedule
+
+<!-- acl: level=manager team=finance -->
+Finance team only: sponsor invoices are issued net-30. Anthropic and Redis have paid
+in full; Vercel's payment is scheduled for the second week after the event. Refund
+clauses apply only if the event is cancelled more than 14 days out.
+
+## Executive Briefing: Sponsor Contract Terms
+
+<!-- acl: level=exec -->
+Executive only — confidential. The Anthropic sponsorship is a 75,000 dollar package
+with category exclusivity in foundation models. Redis contributed 40,000 dollars plus
+infrastructure. The unannounced fourth sponsor, Modal, has signed a 30,000 dollar
+agreement contingent on a keynote slot. Do not disclose these figures.

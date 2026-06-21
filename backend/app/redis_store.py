@@ -19,12 +19,34 @@ from redis.commands.search.field import NumericField, TagField, TextField, Vecto
 from redis.commands.search.index_definition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
 
-from . import embeddings
+from . import acl, embeddings
+from .acl import Identity
 from .store import BaseStore, CacheCandidate, Chunk, ChunkHit, LogEntry
 
-INDEX_NAME = "tessera:idx"
+INDEX_NAME = "tessera:idx:v3"  # carries OrgCache role fields + RBAC acl_level/acl_team
 KEY_PREFIX = "org:"
 ENT_SEP = "|"
+TEAM_ALL = "all"
+
+
+def _enc_team(teams: Optional[List[str]]) -> str:
+    return ENT_SEP.join(teams) if teams else TEAM_ALL
+
+
+def _dec_team(raw: str) -> List[str]:
+    if not raw:
+        return []
+    return [t for t in raw.split(ENT_SEP) if t and t != TEAM_ALL]
+
+
+def _acl_filter(identity: Optional[Identity]) -> str:
+    """RediSearch clause that scopes results to what an identity may see."""
+    if identity is None:
+        return ""
+    parts = [f"@acl_level:[-inf {identity.rank}]"]
+    if not identity.is_exec:  # exec sees across teams
+        parts.append(f"@acl_team:{{{TEAM_ALL}|{identity.team}}}")
+    return " " + " ".join(parts)
 
 # Atomic cache write: HSET the entry, register it in the org cache set, and add it to
 # each contributing chunk's reverse set — all in one shot.
@@ -75,6 +97,9 @@ class RedisStore(BaseStore):
             TagField("seniority"),
             TagField("tenure"),
             NumericField("min_seniority_level"),
+            # RBAC access-control fields (filterable).
+            NumericField("acl_level"),
+            TagField("acl_team", separator=ENT_SEP),
             TextField("text"),
             VectorField(
                 "vector",
@@ -103,7 +128,7 @@ class RedisStore(BaseStore):
                     names.add(a[a.index("identifier") + 1])
                 elif a:
                     names.add(a[1] if len(a) > 1 else a[0])
-            if "min_seniority_level" not in names:
+            if "min_seniority_level" not in names or "acl_team" not in names:
                 self.r.ft(INDEX_NAME).dropindex(delete_documents=False)
                 self._create_index()
         except redis.ResponseError:
@@ -169,30 +194,37 @@ class RedisStore(BaseStore):
                     "chunk_id": c.chunk_id,
                     "hash": c.hash,
                     "entities": ENT_SEP.join(c.entities) if c.entities else "",
+                    "acl_level": acl.level_rank(c.acl_level),
+                    "acl_team": _enc_team(c.acl_teams),
                     "text": c.text,
                     "vector": _to_bytes(c.vector),
                 },
             )
         pipe.execute()
 
-    def search_chunks(self, org: str, qvec: np.ndarray, k: int) -> List[ChunkHit]:
+    def search_chunks(self, org, qvec, k, identity=None) -> List[ChunkHit]:
+        flt = _acl_filter(identity)
         q = (
-            Query(f"(@org:{{{org}}} @doctype:{{chunk}})=>[KNN {k} @vector $vec AS score]")
+            Query(f"(@org:{{{org}}} @doctype:{{chunk}}{flt})=>[KNN {k} @vector $vec AS score]")
             .sort_by("score")
-            .return_fields("chunk_id", "text", "entities", "score")
+            .return_fields("chunk_id", "text", "entities", "acl_level", "acl_team", "score")
             .dialect(2)
         )
         res = self.r.ft(INDEX_NAME).search(q, query_params={"vec": _to_bytes(qvec)})
         hits = []
         for doc in res.docs:
             ents = doc.entities.split(ENT_SEP) if getattr(doc, "entities", "") else []
-            hits.append(ChunkHit(doc.chunk_id, doc.text, 1.0 - float(doc.score), ents))
+            lvl = acl.rank_to_name(int(getattr(doc, "acl_level", 0) or 0))
+            teams = _dec_team(getattr(doc, "acl_team", ""))
+            hits.append(ChunkHit(doc.chunk_id, doc.text, 1.0 - float(doc.score), ents,
+                                 lvl, teams))
         return hits
 
     # ----- cache -----
     def write_cache_entry(self, org, hash_, question, answer, vector, entities,
                           chunk_ids, tokens_in, tokens_out, role="", seniority="",
-                          tenure="", min_seniority_level=1) -> None:
+                          tenure="", min_seniority_level=1, acl_level="public",
+                          acl_teams=None) -> None:
         cache_key = self._cache_key(org, hash_)
         cacheidx = self._cacheidx_key(org)
         now = time.time()
@@ -213,6 +245,8 @@ class RedisStore(BaseStore):
             "hit_count": "0",
             "created_at": str(now),
             "last_asked_at": str(now),
+            "acl_level": acl.level_rank(acl_level),
+            "acl_team": _enc_team(acl_teams),
             "vector": _to_bytes(vector),
         }
         flat: List = []
@@ -225,7 +259,8 @@ class RedisStore(BaseStore):
 
     _CACHE_FIELDS = ("hash", "question", "answer", "entities", "chunk_ids",
                      "tokens_in", "tokens_out", "role", "seniority", "tenure",
-                     "min_seniority_level", "hit_count", "created_at", "last_asked_at")
+                     "min_seniority_level", "hit_count", "created_at", "last_asked_at",
+                     "acl_level", "acl_team")
 
     def _doc_to_candidate(self, doc) -> CacheCandidate:
         ents = doc.entities.split(ENT_SEP) if getattr(doc, "entities", "") else []
@@ -247,18 +282,23 @@ class RedisStore(BaseStore):
             hit_count=int(getattr(doc, "hit_count", 0) or 0),
             created_at=float(getattr(doc, "created_at", 0) or 0),
             last_asked_at=float(getattr(doc, "last_asked_at", 0) or 0),
+            acl_level=acl.rank_to_name(int(getattr(doc, "acl_level", 0) or 0)),
+            acl_teams=_dec_team(getattr(doc, "acl_team", "")),
         )
 
     def search_cache(self, org, qvec, k, user_level=None, role=None,
-                     tenure=None) -> List[CacheCandidate]:
+                     tenure=None, identity=None) -> List[CacheCandidate]:
         from .roles import tenure_boost
 
+        # OrgCache seniority/role filters
         filters = [f"@org:{{{org}}}", "@doctype:{cache}"]
         if user_level is not None:
             filters.append(f"@min_seniority_level:[-inf {int(user_level)}]")
         if role:
             filters.append(f"@role:{{{role}}}")
-        base = "(" + " ".join(filters) + ")"
+        # RBAC access-control filter (appended as raw clause)
+        flt = _acl_filter(identity)
+        base = "(" + " ".join(filters) + flt + ")"
         q = (
             Query(f"{base}=>[KNN {k} @vector $vec AS score]")
             .sort_by("score")
@@ -296,6 +336,8 @@ class RedisStore(BaseStore):
             hit_count=int(d.get("hit_count", 0) or 0),
             created_at=float(d.get("created_at", 0) or 0),
             last_asked_at=float(d.get("last_asked_at", 0) or 0),
+            acl_level=acl.rank_to_name(int(d.get("acl_level", 0) or 0)),
+            acl_teams=_dec_team(d.get("acl_team", "")),
         )
 
     def get_cache_entry(self, org, hash_) -> Optional[CacheCandidate]:

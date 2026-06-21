@@ -3,6 +3,12 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
+class IdentityModel(BaseModel):
+    user: str = "anon"
+    team: str = "all"
+    level: str = "employee"
+
+
 class QueryRequest(BaseModel):
     question: str
     accept_hash: Optional[str] = None
@@ -12,6 +18,8 @@ class QueryRequest(BaseModel):
     seniority: Optional[str] = None
     tenure: Optional[str] = None
     user_level: Optional[int] = None
+    # RBAC identity (optional -> anonymous/public access when omitted)
+    identity: Optional[IdentityModel] = None
 
 
 class IngestRequest(BaseModel):
@@ -50,3 +58,6 @@ class QueryResponse(BaseModel):
     role: str = ""
     seniority: str = ""
     min_seniority_level: int = 1
+    access_level: str = "public"
+    access_teams: List[str] = []
+    sources: List[str] = []

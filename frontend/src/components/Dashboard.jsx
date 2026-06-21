@@ -165,6 +165,7 @@ function ActivityFeed({ events }) {
                     <span className="text-xs text-zinc-600 tabular shrink-0">sim {e.similarity.toFixed(2)}</span>
                   </div>
                   <div className="text-[11px] text-zinc-500">
+                    {e.actor && <span className="text-zinc-400">{e.actor} · </span>}
                     {e.tokens_saved > 0 && `saved $${e.dollars_saved.toFixed(5)}`}
                     {e.note && `${e.tokens_saved > 0 ? " · " : ""}${e.note}`}
                   </div>

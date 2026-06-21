@@ -18,13 +18,19 @@ import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from . import embeddings, entities
+from . import acl, embeddings, entities, telemetry
+from .acl import Identity, Label
 from .config import get_settings
 from .llm import get_llm
 from .store import BaseStore, LogEntry
 
 TOP_K = 5
 RAG_K = 4
+RAG_FLOOR = 0.25  # below this, no retrieved chunk is relevant enough to ground on
+NO_SOURCE_ANSWER = (
+    "I couldn't find anything about that in the resources available to your access "
+    "level. If you believe you should have access, contact an administrator."
+)
 
 
 @dataclass
@@ -52,6 +58,9 @@ class QueryResult:
     role: str = ""
     seniority: str = ""
     min_seniority_level: int = 1
+    access_level: str = "public"
+    access_teams: List[str] = field(default_factory=list)
+    sources: List[str] = field(default_factory=list)
 
 
 def normalize_question(q: str) -> str:
@@ -60,6 +69,13 @@ def normalize_question(q: str) -> str:
 
 def query_hash(q: str) -> str:
     return hashlib.sha256(normalize_question(q).encode()).hexdigest()[:16]
+
+
+def scoped_key(question: str, label: Label) -> str:
+    """Cache key partitioned by access scope: identical questions are shared within a
+    scope (teammates at the same clearance) but never across scopes."""
+    tag = f"{label.level}|{','.join(sorted(label.teams))}"
+    return hashlib.sha256((normalize_question(question) + "||" + tag).encode()).hexdigest()[:16]
 
 
 def _dollars(tokens_in: int, tokens_out: int) -> float:
@@ -123,6 +139,7 @@ class Engine:
         self,
         org: str,
         question: str,
+        identity: Optional[Identity] = None,
         accept_hash: Optional[str] = None,
         force_generate: bool = False,
         compress: bool = True,
@@ -134,24 +151,45 @@ class Engine:
         from .roles import normalize_level
 
         level = normalize_level(seniority, user_level)
-        qvec = embeddings.embed(question)
+        identity = identity or Identity()
+        telemetry.set_identity(identity)
+        with telemetry.span("ai.embed", "embed question") as _sp:
+            qvec = embeddings.embed(question)
+            telemetry.set_span_data(_sp, dims=len(qvec))
         qents = entities.extract(question)
 
-        # User accepted a suggested prior answer -> serve it as an instant hit.
+        # Governance: runs on every query (hit OR miss). The unfiltered global top is
+        # the best match over ALL sources; if it's gated for this identity, then no
+        # chunk they're allowed to see outranked it -> they're reaching above clearance.
+        self._check_boundary_probe(org, qvec, question, identity)
+
+        # User accepted a suggested prior answer -> serve it (only if still authorized).
         if accept_hash:
             entry = self.store.get_cache_entry(org, accept_hash)
-            if entry:
-                return self._serve_hit(org, question, entry, similarity=1.0,
+            if entry and acl.can_access(identity, entry.acl_level, entry.acl_teams):
+                return self._serve_hit(org, question, entry, identity, similarity=1.0,
                                        note="user-selected suggestion")
+            if entry is not None:  # entry exists, but this identity is not authorized
+                telemetry.capture_governance_event(
+                    "ACL_DENIAL", identity, question,
+                    required_level=entry.acl_level, required_teams=entry.acl_teams,
+                    via="accept_hash")
 
-        candidates = self.store.search_cache(
-            org, qvec, TOP_K, user_level=level, role=role, tenure=tenure)
-        best = candidates[0] if candidates else None
+        # Cache search is both access-scoped (RBAC identity) and segment-scoped
+        # (OrgCache seniority hierarchy + role); candidates the user may not see never
+        # appear here, so neither hits NOR suggestions can leak across boundaries.
+        with telemetry.span("cache.search", "access-scoped vector search") as _sp:
+            candidates = self.store.search_cache(
+                org, qvec, TOP_K, user_level=level, role=role, tenure=tenure,
+                identity=identity)
+            best = candidates[0] if candidates else None
+            telemetry.set_span_data(_sp, candidates=len(candidates),
+                                    top_similarity=round(best.score, 4) if best else 0.0)
 
         if not force_generate and best is not None:
             match = entities.entity_match(qents, best.entities)
             if best.score >= self.settings.sim_hit and match:
-                return self._serve_hit(org, question, best, similarity=best.score)
+                return self._serve_hit(org, question, best, identity, similarity=best.score)
 
             # Gray zone (mid sim) OR high sim but entity conflict -> suggest popup.
             if best.score >= self.settings.sim_suggest:
@@ -163,8 +201,12 @@ class Engine:
                     sugg.append(Suggestion(c.hash, c.question, round(c.score, 4),
                                            conflict, cats))
                 self.store.bump_stats(org, suggests=1)
+                telemetry.tag_decision("suggest", identity.level)
+                telemetry.capture_governance_event(
+                    "NEAR_MISS", identity, question,
+                    top_similarity=round(best.score, 4), matched=best.question)
                 self._log(org, question, "suggest", best.score, None, 0, 0.0,
-                          note="surfaced close matches")
+                          identity=identity, note="surfaced close matches")
                 return QueryResult(
                     decision="suggest",
                     cached=False,
@@ -173,20 +215,26 @@ class Engine:
                     matched_question=best.question,
                     suggestions=sugg,
                     entities=qents,
+                    access_level=identity.level,
+                    access_teams=[identity.team] if identity.team != "all" else [],
                 )
 
         # Cache miss -> generate.
-        return self._generate(org, question, qvec, qents, compress=compress,
-                              similarity=best.score if best else 0.0)
+        return self._generate(org, question, qvec, qents, identity, compress=compress,
+                              similarity=best.score if best else 0.0,
+                              role=role, seniority=seniority, tenure=tenure)
 
     # -------------------------------------------------------------- helpers
-    def _serve_hit(self, org, question, entry, similarity, note="") -> QueryResult:
+    def _serve_hit(self, org, question, entry, identity, similarity, note="") -> QueryResult:
         saved_tokens = entry.tokens_in + entry.tokens_out
         saved_usd = _dollars(entry.tokens_in, entry.tokens_out)
         self.store.bump_stats(org, hits=1, tokens_saved=saved_tokens, saved_usd=saved_usd)
         self.store.bump_hit(org, entry.hash)
+        telemetry.tag_decision("hit", entry.acl_level)
+        telemetry.breadcrumb("cache.hit", "served from cache",
+                             access_level=entry.acl_level, saved_usd=round(saved_usd, 6))
         self._log(org, question, "hit", similarity, entry.question, saved_tokens,
-                  saved_usd, note=note)
+                  saved_usd, identity=identity, note=note)
         return QueryResult(
             decision="hit",
             cached=True,
@@ -202,32 +250,75 @@ class Engine:
             role=entry.role,
             seniority=entry.seniority,
             min_seniority_level=entry.min_seniority_level,
+            access_level=entry.acl_level,
+            access_teams=entry.acl_teams,
+            sources=entry.chunk_ids,
         )
 
-    def _generate(self, org, question, qvec, qents, compress, similarity) -> QueryResult:
-        hkey = f"{org}:{query_hash(question)}"
+    def _check_boundary_probe(self, org, qvec, question, identity) -> None:
+        if identity.is_exec:
+            return
+        glob = self.store.search_chunks(org, qvec, 1)  # unfiltered global top
+        if (glob and glob[0].score >= self.settings.sim_suggest
+                and not acl.can_access(identity, glob[0].acl_level, glob[0].acl_teams)):
+            telemetry.note_boundary_attempt(org, identity, question, glob[0])
+
+    def _generate(self, org, question, qvec, qents, identity, compress, similarity,
+                  role=None, seniority=None, tenure=None) -> QueryResult:
+        # RAG retrieval is itself access-scoped: a low-clearance user's answer can only
+        # ever be grounded on chunks they're allowed to read.
+        with telemetry.span("rag.retrieve", "access-scoped retrieval") as _sp:
+            chunk_hits = self.store.search_chunks(org, qvec, RAG_K, identity)
+            telemetry.set_span_data(_sp, chunks=len(chunk_hits),
+                                    top=round(chunk_hits[0].score, 4) if chunk_hits else 0.0)
+        top = chunk_hits[0].score if chunk_hits else 0.0
+        if not chunk_hits or top < RAG_FLOOR:
+            self.store.bump_stats(org, misses=1)
+            telemetry.tag_decision("miss", identity.level)
+            telemetry.capture_governance_event(
+                "UNGROUNDED_ANSWER", identity, question, top_score=round(top, 4))
+            self._log(org, question, "miss", similarity, None, 0, 0.0, identity=identity,
+                      note="no accessible source")
+            return QueryResult(
+                decision="miss", cached=False, answer=NO_SOURCE_ANSWER,
+                similarity=round(similarity, 4), matched_question=None,
+                via="policy", model="access", entities=qents,
+                role=role or "", seniority=seniority or "",
+                access_level=identity.level,
+            )
+
+        # Only the chunks actually relevant enough to ground the answer define its label.
+        used = [h for h in chunk_hits if h.score >= max(RAG_FLOOR, 0.5 * top)] or chunk_hits[:1]
+        label = acl.combine([Label(h.acl_level, h.acl_teams) for h in used])
+        key = scoped_key(question, label)
+
+        hkey = f"{org}:{key}"
         got_lock = self.store.try_lock(hkey, ttl=20)
         if not got_lock:
-            # Another identical request is in flight; coalesce by waiting for it.
+            # Another identical (same-scope) request is in flight; coalesce.
             for _ in range(40):
                 time.sleep(0.25)
-                entry = self.store.get_cache_entry(org, query_hash(question))
+                entry = self.store.get_cache_entry(org, key)
                 if entry:
-                    return self._serve_hit(org, question, entry, similarity=1.0,
+                    return self._serve_hit(org, question, entry, identity, similarity=1.0,
                                            note="coalesced with in-flight request")
         try:
-            chunk_hits = self.store.search_chunks(org, qvec, RAG_K)
-            contexts = [h.text for h in chunk_hits]
+            contexts = [h.text for h in used]
             if compress:
                 contexts = _compress(question, contexts)
             llm = get_llm()
-            gen = llm.generate(question, contexts, simple=_is_simple(question))
+            with telemetry.span("llm.generate", "generate grounded answer") as _sp:
+                gen = llm.generate(question, contexts, simple=_is_simple(question))
+                telemetry.set_span_data(_sp, model=gen.model, via=gen.via,
+                                        tokens_in=gen.tokens_in, tokens_out=gen.tokens_out)
 
             spent_usd = _dollars(gen.tokens_in, gen.tokens_out)
-            chunk_ids = [h.chunk_id for h in chunk_hits]
+            telemetry.record_cost(gen.tokens_in, gen.tokens_out, spent_usd)
+            telemetry.tag_decision("miss", label.level)
+            chunk_ids = [h.chunk_id for h in used]
             self.store.write_cache_entry(
                 org=org,
-                hash_=query_hash(question),
+                hash_=key,
                 question=question,
                 answer=gen.answer,
                 vector=qvec,
@@ -235,11 +326,16 @@ class Engine:
                 chunk_ids=chunk_ids,
                 tokens_in=gen.tokens_in,
                 tokens_out=gen.tokens_out,
+                role=role or "",
+                seniority=seniority or "",
+                tenure=tenure or "",
+                acl_level=label.level,
+                acl_teams=label.teams,
             )
             self.store.bump_stats(org, misses=1, spend_usd=spent_usd,
                                   tokens_spent=gen.tokens_in + gen.tokens_out)
-            self._log(org, question, "miss", similarity, None, 0, 0.0,
-                      note=f"generated via {gen.via} ({gen.model})")
+            self._log(org, question, "miss", similarity, None, 0, 0.0, identity=identity,
+                      note=f"generated via {gen.via} ({gen.model}) @ {label.level}")
             return QueryResult(
                 decision="miss",
                 cached=False,
@@ -249,12 +345,21 @@ class Engine:
                 via=gen.via,
                 model=gen.model,
                 entities=qents,
+                role=role or "",
+                seniority=seniority or "",
+                access_level=label.level,
+                access_teams=label.teams,
+                sources=chunk_ids,
             )
         finally:
             self.store.release_lock(hkey)
 
     def _log(self, org, question, decision, similarity, matched, tokens_saved,
-             dollars_saved, note=""):
+             dollars_saved, identity: Optional[Identity] = None, note=""):
+        actor, access = "", ""
+        if identity:
+            actor = f"{identity.user} ({identity.team}/{identity.level})"
+            access = identity.level
         self.store.append_log(org, LogEntry(
             ts=time.time(),
             question=question,
@@ -264,4 +369,6 @@ class Engine:
             tokens_saved=int(tokens_saved),
             dollars_saved=round(float(dollars_saved), 6),
             note=note,
+            actor=actor,
+            access=access,
         ))
