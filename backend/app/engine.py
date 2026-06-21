@@ -49,6 +49,9 @@ class QueryResult:
     via: str = ""
     model: str = ""
     entities: List[str] = field(default_factory=list)
+    role: str = ""
+    seniority: str = ""
+    min_seniority_level: int = 1
 
 
 def normalize_question(q: str) -> str:
@@ -103,7 +106,14 @@ class Engine:
         accept_hash: Optional[str] = None,
         force_generate: bool = False,
         compress: bool = True,
+        role: Optional[str] = None,
+        seniority: Optional[str] = None,
+        tenure: Optional[str] = None,
+        user_level: Optional[int] = None,
     ) -> QueryResult:
+        from .roles import normalize_level
+
+        level = normalize_level(seniority, user_level)
         qvec = embeddings.embed(question)
         qents = entities.extract(question)
 
@@ -114,7 +124,8 @@ class Engine:
                 return self._serve_hit(org, question, entry, similarity=1.0,
                                        note="user-selected suggestion")
 
-        candidates = self.store.search_cache(org, qvec, TOP_K)
+        candidates = self.store.search_cache(
+            org, qvec, TOP_K, user_level=level, role=role, tenure=tenure)
         best = candidates[0] if candidates else None
 
         if not force_generate and best is not None:
@@ -153,6 +164,7 @@ class Engine:
         saved_tokens = entry.tokens_in + entry.tokens_out
         saved_usd = _dollars(entry.tokens_in, entry.tokens_out)
         self.store.bump_stats(org, hits=1, tokens_saved=saved_tokens, saved_usd=saved_usd)
+        self.store.bump_hit(org, entry.hash)
         self._log(org, question, "hit", similarity, entry.question, saved_tokens,
                   saved_usd, note=note)
         return QueryResult(
@@ -165,6 +177,9 @@ class Engine:
             dollars_saved=round(saved_usd, 6),
             via="cache",
             model="cache",
+            role=entry.role,
+            seniority=entry.seniority,
+            min_seniority_level=entry.min_seniority_level,
         )
 
     def _generate(self, org, question, qvec, qents, compress, similarity) -> QueryResult:

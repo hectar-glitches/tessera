@@ -102,6 +102,35 @@ hybrid passes all four. This is re-runnable live from the dashboard.
 - Cache-entry writes and their reverse-index updates are wrapped in a single Lua
   script so a concurrent re-ingest can't open a stale-write window.
 
+## Role-aware cache (OrgCache)
+
+OrgCache builds on Tessera with a role + seniority + tenure segmentation layer so an
+org's shared cache serves *role-appropriate* answers.
+
+**New cache-entry fields:** `role` (engineer/designer/pm/devops/manager),
+`seniority` (junior/mid/senior/staff/principal), `tenure` (onboarding/experienced),
+`min_seniority_level` (1–5), plus `hit_count`, `created_at`, `last_asked_at`.
+
+**Hierarchy rule:** a user at `user_level = L` only sees entries with
+`min_seniority_level <= L` (junior=1 … principal=5). Tenure adds a soft re-rank boost
+(onboarding favors setup/tooling; experienced favors architecture/patterns).
+
+**Endpoints (org `acmecorp`):**
+
+- `POST /api/orgs/{org}/query` (and alias `/check`) accept optional
+  `{ role, seniority, tenure, user_level }`; omitting them preserves legacy behavior.
+- `GET /api/orgs/{org}/trending?role=&seniority=&tenure=&limit=` — top entries by
+  `hit_count` for a segment, hierarchy-filtered.
+- `GET /api/orgs/{org}/entries`, `PATCH /api/orgs/{org}/entries/{hash}`
+  (`answer`, `min_seniority_level`), `DELETE /api/orgs/{org}/entries/{hash}` — dashboard
+  entry management.
+
+**Seed:** `POST /api/orgs/acmecorp/ingest/seed` loads 60 role-tagged AcmeCorp Q&As
+(Next.js + PostgreSQL + AWS) from `backend/data/acmecorp_seed.json`.
+
+**Tests:** `cd backend && python -m scripts.smoke` (legacy) and `pytest -q`
+(role-filtering suite in `backend/tests/`).
+
 ## Track
 
 Submitted under **Ddoski's Toolbox** (single main track).
