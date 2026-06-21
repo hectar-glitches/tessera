@@ -14,7 +14,7 @@ function log(msg: string) {
 }
 
 function readContext(): UserContext {
-  const cfg = vscode.workspace.getConfiguration("orgcache");
+  const cfg = vscode.workspace.getConfiguration("tessera");
   return {
     serverUrl: cfg.get<string>("serverUrl", "http://localhost:8000"),
     org: cfg.get<string>("org", "acmecorp"),
@@ -25,30 +25,26 @@ function readContext(): UserContext {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-  output = vscode.window.createOutputChannel("OrgCache");
+  output = vscode.window.createOutputChannel("Tessera");
   context.subscriptions.push(output);
-  log("OrgCache activated");
+  log("Tessera activated");
 
   const ctx = readContext();
   log(`context: org=${ctx.org} role=${ctx.role} seniority=${ctx.seniority} ` +
       `(level ${levelForSeniority(ctx.seniority)}) tenure=${ctx.tenure}`);
 
-  // Trending sidebar.
   trendingProvider = new TrendingProvider(context);
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider("orgcache.trending", trendingProvider),
+    vscode.window.registerWebviewViewProvider("tessera.trending", trendingProvider),
   );
 
-  // Commands.
   context.subscriptions.push(
-    vscode.commands.registerCommand("orgcache.checkSelection", () => checkSelectionCommand()),
-    vscode.commands.registerCommand("orgcache.openTrending", () => trendingProvider?.refresh()),
+    vscode.commands.registerCommand("tessera.checkSelection", () => checkSelectionCommand()),
+    vscode.commands.registerCommand("tessera.openTrending", () => trendingProvider?.refresh()),
   );
 
-  // Claude Code PreToolUse hook listener.
   startHookListener(context);
 
-  // Refresh trending every 5 minutes.
   const timer = setInterval(() => trendingProvider?.refresh(), 5 * 60 * 1000);
   context.subscriptions.push({ dispose: () => clearInterval(timer) });
 }
@@ -59,7 +55,7 @@ export function deactivate() {
 
 // ----------------------------------------------------------------- hook listener
 function startHookListener(context: vscode.ExtensionContext) {
-  const cfg = vscode.workspace.getConfiguration("orgcache");
+  const cfg = vscode.workspace.getConfiguration("tessera");
   const port = cfg.get<number>("hookPort", 7777);
 
   hookServer = http.createServer((req, res) => {
@@ -83,8 +79,7 @@ function startHookListener(context: vscode.ExtensionContext) {
       }
       log(`hook question: ${question}`);
       const result = await handleQuestion(question);
-      // Tell Claude Code to continue (we never block; the popup is advisory).
-      respond({ decision: "continue", orgcache: { hit: result?.decision === "hit" } });
+      respond({ decision: "continue", tessera: { hit: result?.decision === "hit" } });
     });
   });
 
@@ -96,7 +91,7 @@ function startHookListener(context: vscode.ExtensionContext) {
 // --------------------------------------------------------------- core behaviors
 async function handleQuestion(question: string): Promise<CheckResult | null> {
   const ctx = readContext();
-  const cfg = vscode.workspace.getConfiguration("orgcache");
+  const cfg = vscode.workspace.getConfiguration("tessera");
   const threshold = cfg.get<number>("similarityThreshold", 0.85);
 
   const result = await checkCache(ctx, question, log);
@@ -115,12 +110,12 @@ async function checkSelectionCommand() {
   const editor = vscode.window.activeTextEditor;
   let text = editor?.document.getText(editor.selection)?.trim();
   if (!text) {
-    text = await vscode.window.showInputBox({ prompt: "Ask OrgCache" });
+    text = await vscode.window.showInputBox({ prompt: "Ask Tessera" });
   }
   if (!text) return;
   const result = await handleQuestion(text);
   if (!result || result.decision !== "hit") {
-    vscode.window.showInformationMessage("OrgCache: no confident cached answer — ask your agent.");
+    vscode.window.showInformationMessage("Tessera: no confident cached answer — ask your agent.");
   }
 }
 
@@ -129,8 +124,8 @@ let popupPanel: vscode.WebviewPanel | undefined;
 function showPopup(result: CheckResult, opts: { question: string; count?: number }) {
   if (!popupPanel) {
     popupPanel = vscode.window.createWebviewPanel(
-      "orgcache.popup",
-      "⚡ OrgCache",
+      "tessera.popup",
+      "Tessera",
       { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
       { enableScripts: true, retainContextWhenHidden: true },
     );
@@ -142,13 +137,13 @@ function showPopup(result: CheckResult, opts: { question: string; count?: number
   const sub = popupPanel.webview.onDidReceiveMessage(async (msg) => {
     if (msg.action === "use") {
       await vscode.env.clipboard.writeText(result.answer || "");
-      vscode.window.showInformationMessage("OrgCache: answer copied to clipboard.");
+      vscode.window.showInformationMessage("Tessera: answer copied to clipboard.");
       popupPanel?.dispose();
     } else if (msg.action === "ask") {
       log("user chose Ask Agent — forwarding to coding agent");
       popupPanel?.dispose();
     } else if (msg.action === "dismiss") {
-      log("user dismissed popup (negative signal)");
+      log("user dismissed popup");
       popupPanel?.dispose();
     }
   });
