@@ -131,6 +131,34 @@ org's shared cache serves *role-appropriate* answers.
 **Tests:** `cd backend && python -m scripts.smoke` (legacy) and `pytest -q`
 (role-filtering suite in `backend/tests/`).
 
+## Observability (Arize)
+
+Every cache decision is logged via `backend/app/arize_logger.py` with its similarity,
+role, seniority, tokens saved, and latency. Set `ARIZE_API_KEY` + `ARIZE_SPACE_KEY` to
+ship records to Arize; without them, decisions are logged as structured JSON lines to
+stdout (prefixed `ARIZE_LOG`) so the pipeline stays demoable offline. The logger never
+raises into the request path.
+
+## MCP server
+
+`mcp-server/` is a Node MCP server (stdio transport) exposing OrgCache to any
+MCP-compatible agent (Claude Code, Cursor, Devin, …). Tools: `check_cache`,
+`store_answer`, `get_trending`. Connect an agent by adding to its MCP config:
+
+```json
+{
+  "mcpServers": {
+    "orgcache": {
+      "command": "node",
+      "args": ["path/to/orgcache/mcp-server/index.js"],
+      "env": { "ORGCACHE_URL": "http://localhost:8000" }
+    }
+  }
+}
+```
+
+See `mcp-server/README.md` for details and `npm test` (boots a mock backend).
+
 ## Track
 
 Submitted under **Ddoski's Toolbox** (single main track).
