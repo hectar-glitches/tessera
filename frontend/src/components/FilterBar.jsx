@@ -1,45 +1,59 @@
-import { Users, Layers, Clock } from "lucide-react";
-
 const ROLES = ["engineer", "designer", "pm", "devops", "manager"];
 const SENIORITIES = ["junior", "mid", "senior", "staff", "principal"];
 const TENURES = ["onboarding", "experienced"];
 
-// Top-of-dashboard filter bar. Owns the role/seniority/tenure selection that every
-// OrgCache section below filters by.
+// Top-of-dashboard filter bar. Horizontal pill groups (not form controls) — owns the
+// role/seniority/tenure selection that every section below filters by.
 export default function FilterBar({ value, onChange }) {
-  const set = (k) => (e) => onChange({ ...value, [k]: e.target.value || undefined });
+  const pick = (k) => (v) => onChange({ ...value, [k]: v });
+  const active = value.role || value.seniority || value.tenure;
   return (
-    <div className="bg-panel border border-edge rounded-2xl p-4 flex flex-wrap items-center gap-3">
-      <span className="text-sm text-slate-400 mr-1">Segment</span>
-      <Dropdown icon={Users} value={value.role} onChange={set("role")} options={ROLES} placeholder="All roles" />
-      <Dropdown icon={Layers} value={value.seniority} onChange={set("seniority")} options={SENIORITIES} placeholder="All seniorities" />
-      <Dropdown icon={Clock} value={value.tenure} onChange={set("tenure")} options={TENURES} placeholder="All tenures" />
-      {(value.role || value.seniority || value.tenure) && (
+    <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
+      <PillGroup options={ROLES} value={value.role} onChange={pick("role")} />
+      <Divider />
+      <PillGroup options={SENIORITIES} value={value.seniority} onChange={pick("seniority")} />
+      <Divider />
+      <PillGroup options={TENURES} value={value.tenure} onChange={pick("tenure")} />
+      {active && (
         <button
           onClick={() => onChange({})}
-          className="text-xs text-slate-400 hover:text-rose-300 ml-auto"
+          className="ml-auto text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
         >
-          Clear filters
+          Clear
         </button>
       )}
     </div>
   );
 }
 
-function Dropdown({ icon: Icon, value, onChange, options, placeholder }) {
+function Divider() {
+  return <span className="h-5 w-px bg-line" aria-hidden />;
+}
+
+function PillGroup({ options, value, onChange }) {
   return (
-    <label className="flex items-center gap-2 bg-ink border border-edge rounded-lg px-2.5 py-1.5">
-      <Icon size={14} className="text-slate-500" />
-      <select
-        value={value || ""}
-        onChange={onChange}
-        className="bg-transparent text-sm outline-none text-slate-200 capitalize"
-      >
-        <option value="">{placeholder}</option>
-        {options.map((o) => (
-          <option key={o} value={o} className="bg-ink capitalize">{o}</option>
-        ))}
-      </select>
-    </label>
+    <div className="flex items-center gap-1">
+      <Pill selected={!value} onClick={() => onChange(undefined)}>All</Pill>
+      {options.map((o) => (
+        <Pill key={o} selected={value === o} onClick={() => onChange(o)}>
+          {o}
+        </Pill>
+      ))}
+    </div>
+  );
+}
+
+function Pill({ selected, onClick, children }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`rounded-full px-3 py-1 text-xs font-medium capitalize transition-colors ${
+        selected
+          ? "bg-zinc-800 text-zinc-100"
+          : "text-zinc-500 hover:text-zinc-300"
+      }`}
+    >
+      {children}
+    </button>
   );
 }

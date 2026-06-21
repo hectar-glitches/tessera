@@ -36,6 +36,17 @@ class Settings(BaseSettings):
     arize_space_key: str = ""
     arize_model_id: str = "orgcache-decisions"
 
+    # CORS — comma-separated list of allowed origins. Defaults to "*" (open) for local
+    # dev; set CORS_ORIGINS in production to lock down to the dashboard URL(s).
+    cors_origins: str = "*"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        raw = self.cors_origins.strip()
+        if not raw or raw == "*":
+            return ["*"]
+        return [o.strip() for o in raw.split(",") if o.strip()]
+
 
 @lru_cache
 def get_settings() -> Settings:

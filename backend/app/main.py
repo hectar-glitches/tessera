@@ -28,9 +28,11 @@ from .store import get_store
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 app = FastAPI(title="Tessera", version="1.0.0")
+# Origins come from CORS_ORIGINS (comma-separated). Defaults to "*" for local dev;
+# set it to the dashboard URL(s) in production to lock the API down.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=get_settings().cors_origin_list,
     allow_methods=["*"],
     allow_headers=["*"],
 )

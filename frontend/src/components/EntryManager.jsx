@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import { ListChecks, Save, Trash2, AlertTriangle, X } from "lucide-react";
+import { Pencil, Trash2, Check, X } from "lucide-react";
+import { Panel, SectionHeader, Tag } from "./ui.jsx";
 
 const STALE_DAYS = 30;
 const isStale = (ts) => ts && (Date.now() / 1000 - ts) > STALE_DAYS * 86400;
 
 // Cache Entry Manager: list, inline-edit answer, set min_seniority_level, delete.
-// Edit/Delete/Set-Level are feature-flagged off when the backend write endpoints are
-// unavailable (detected via a probe of api.updateEntry support).
+// Divider-separated rows; action icons reveal on hover.
 export default function EntryManager({ api, filters, writable = true }) {
   const [entries, setEntries] = useState([]);
   const [editing, setEditing] = useState(null); // hash being edited
@@ -34,85 +34,74 @@ export default function EntryManager({ api, filters, writable = true }) {
   }
 
   return (
-    <div className="bg-panel border border-edge rounded-2xl p-5">
-      <div className="flex items-center gap-2 mb-3">
-        <ListChecks size={16} className="text-indigo-400" />
-        <span className="font-medium">Cache entry manager</span>
-        <span className="text-xs text-slate-500">{entries.length} entries</span>
-        {!writable && (
-          <span className="text-[10px] text-amber-400 bg-amber-500/10 rounded px-1.5 py-0.5 ml-auto">
-            read-only (backend pending)
-          </span>
+    <Panel>
+      <SectionHeader
+        right={<span className="text-xs text-zinc-600 tabular">{entries.length}</span>}
+      >
+        Entries
+      </SectionHeader>
+      <div className="max-h-[420px] overflow-y-auto scrollbar-thin divide-y divide-line -my-1">
+        {entries.length === 0 && (
+          <div className="py-8 text-sm text-zinc-600 text-center">No entries for this segment.</div>
         )}
-      </div>
-      <div className="space-y-2 max-h-[420px] overflow-y-auto scrollbar-thin">
-        {entries.length === 0 && <div className="text-sm text-slate-500">No entries for this segment.</div>}
         {entries.map((e) => (
-          <div key={e.hash} className="bg-ink border border-edge rounded-xl px-3 py-2">
-            <div className="flex items-start gap-2">
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium truncate flex items-center gap-2">
-                  {e.question}
-                  {isStale(e.created_at) && (
-                    <span title="Older than 30 days" className="text-amber-400 inline-flex items-center gap-0.5 text-[10px]">
-                      <AlertTriangle size={11} /> stale
-                    </span>
-                  )}
-                </div>
-                {editing === e.hash ? (
-                  <div className="flex items-center gap-2 mt-1">
-                    <input
-                      value={draft}
-                      onChange={(ev) => setDraft(ev.target.value)}
-                      className="flex-1 bg-panel border border-edge rounded-lg px-2 py-1 text-xs outline-none focus:border-indigo-500"
-                    />
-                    <button onClick={() => saveAnswer(e.hash)} className="text-emerald-400 hover:text-emerald-300"><Save size={15} /></button>
-                    <button onClick={() => setEditing(null)} className="text-slate-500 hover:text-slate-300"><X size={15} /></button>
-                  </div>
-                ) : (
-                  <div className="text-xs text-slate-400 truncate">{e.answer}</div>
-                )}
-                <div className="text-[11px] text-slate-600 mt-1 flex items-center gap-2 flex-wrap">
-                  <span className="capitalize">{e.role || "—"}</span>
-                  <span>·</span>
-                  <span className="capitalize">{e.seniority || "—"}</span>
-                  <span>·</span>
-                  <span>{e.hit_count} hits</span>
-                </div>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <label className="text-[11px] text-slate-500 flex items-center gap-1">
-                  L
-                  <select
-                    disabled={!writable}
-                    value={e.min_seniority_level}
-                    onChange={(ev) => setLevel(e.hash, ev.target.value)}
-                    className="bg-panel border border-edge rounded px-1 py-0.5 text-xs disabled:opacity-40"
-                  >
-                    {[1, 2, 3, 4, 5].map((l) => <option key={l} value={l}>{l}</option>)}
-                  </select>
-                </label>
+          <div key={e.hash} className="group py-3 -mx-2 px-2 rounded-lg hover:bg-zinc-900 transition-colors">
+            <div className="flex items-center gap-2">
+              {isStale(e.created_at) && (
+                <span title="Older than 30 days" className="h-1.5 w-1.5 rounded-full bg-amber-500 shrink-0" />
+              )}
+              <span className="flex-1 min-w-0 truncate text-sm font-medium text-zinc-200">
+                {e.question}
+              </span>
+              <div className="flex items-center gap-2 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                <input
+                  type="number"
+                  min={1}
+                  max={5}
+                  disabled={!writable}
+                  value={e.min_seniority_level}
+                  onChange={(ev) => setLevel(e.hash, ev.target.value)}
+                  title="Minimum seniority level"
+                  className="w-10 bg-transparent text-center text-xs text-zinc-400 rounded border border-line focus:border-line-strong outline-none disabled:opacity-40"
+                />
                 <button
                   disabled={!writable}
                   onClick={() => { setEditing(e.hash); setDraft(e.answer); }}
-                  className="text-slate-400 hover:text-indigo-300 disabled:opacity-40"
+                  className="text-zinc-500 hover:text-zinc-200 disabled:opacity-40"
                   title="Edit answer"
                 >
-                  <Save size={14} className="rotate-0" />
+                  <Pencil size={14} />
                 </button>
                 <button
                   disabled={!writable}
                   onClick={() => remove(e.hash)}
-                  className="text-slate-400 hover:text-rose-300 disabled:opacity-40"
+                  className="text-zinc-500 hover:text-red-400 disabled:opacity-40"
                   title="Delete entry"
                 >
                   <Trash2 size={14} />
                 </button>
               </div>
             </div>
+            {editing === e.hash ? (
+              <div className="flex items-center gap-2 mt-2">
+                <input
+                  value={draft}
+                  onChange={(ev) => setDraft(ev.target.value)}
+                  className="flex-1 bg-canvas rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 border border-line focus:border-brand outline-none"
+                />
+                <button onClick={() => saveAnswer(e.hash)} className="text-green-500 hover:text-green-400"><Check size={15} /></button>
+                <button onClick={() => setEditing(null)} className="text-zinc-500 hover:text-zinc-300"><X size={15} /></button>
+              </div>
+            ) : (
+              <div className="mt-1 flex items-center gap-2">
+                <span className="flex-1 min-w-0 truncate text-xs text-zinc-500">{e.answer}</span>
+                <Tag>{e.role}</Tag>
+                <Tag>{e.seniority}</Tag>
+              </div>
+            )}
           </div>
         ))}
       </div>
-    </div>
+    </Panel>
   );
 }

@@ -1,6 +1,7 @@
 import { mockApi } from "./mockData.js";
 
-const BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+// VITE_API_URL is the production var (Vercel); VITE_API_BASE kept for back-compat.
+const BASE = import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE || "http://localhost:8000";
 export const ORG = "ask-ddoski";
 // Force offline/mock mode with VITE_USE_MOCK=1; otherwise we fall back to mock data
 // only when a live request fails, so the dashboard always renders.

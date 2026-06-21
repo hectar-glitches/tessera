@@ -1,15 +1,8 @@
 import { useEffect, useState } from "react";
-import { TrendingUp, ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
+import { Panel, SectionHeader, Tag, fmtAgo } from "./ui.jsx";
 
-const fmtAgo = (ts) => {
-  if (!ts) return "—";
-  const s = Date.now() / 1000 - ts;
-  if (s < 3600) return `${Math.max(1, Math.round(s / 60))}m ago`;
-  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-  return `${Math.round(s / 86400)}d ago`;
-};
-
-// Trending FAQ table for the selected segment. Click a row to expand the full answer.
+// Trending FAQ list for the selected segment. Click a row to expand the full answer.
 export default function TrendingTable({ api, filters }) {
   const [items, setItems] = useState([]);
   const [open, setOpen] = useState(null);
@@ -23,55 +16,51 @@ export default function TrendingTable({ api, filters }) {
   }, [api, filters]);
 
   return (
-    <div className="bg-panel border border-edge rounded-2xl p-5">
-      <div className="flex items-center gap-2 mb-3">
-        <TrendingUp size={16} className="text-emerald-400" />
-        <span className="font-medium">Trending FAQs</span>
-        <span className="text-xs text-slate-500">for this segment</span>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500">
-              <th className="py-2 pr-2"></th>
-              <th className="py-2 pr-2">Question</th>
-              <th className="py-2 pr-2">Role</th>
-              <th className="py-2 pr-2">Seniority</th>
-              <th className="py-2 pr-2 text-right">Hits</th>
-              <th className="py-2 pr-2 text-right">Last asked</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.length === 0 && (
-              <tr><td colSpan={6} className="py-4 text-slate-500 text-center">No trending questions for this segment yet.</td></tr>
-            )}
-            {items.map((it) => (
-              <RowGroup key={it.hash} it={it} open={open === it.hash} onToggle={() => setOpen(open === it.hash ? null : it.hash)} />
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
+    <Panel>
+      <SectionHeader>Trending</SectionHeader>
+      {items.length === 0 ? (
+        <div className="py-8 text-sm text-zinc-600 text-center">
+          No trending questions for this segment yet.
+        </div>
+      ) : (
+        <div className="-mx-2">
+          {items.map((it) => (
+            <Row
+              key={it.hash}
+              it={it}
+              open={open === it.hash}
+              onToggle={() => setOpen(open === it.hash ? null : it.hash)}
+            />
+          ))}
+        </div>
+      )}
+    </Panel>
   );
 }
 
-function RowGroup({ it, open, onToggle }) {
+function Row({ it, open, onToggle }) {
   return (
-    <>
-      <tr className="border-t border-edge hover:bg-ink/60 cursor-pointer" onClick={onToggle}>
-        <td className="py-2 pr-2 text-slate-500">{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</td>
-        <td className="py-2 pr-2 max-w-[260px] truncate">{it.question}</td>
-        <td className="py-2 pr-2 capitalize text-slate-300">{it.role || "—"}</td>
-        <td className="py-2 pr-2 capitalize text-slate-300">{it.seniority || "—"}</td>
-        <td className="py-2 pr-2 text-right font-semibold text-emerald-400">{it.count}</td>
-        <td className="py-2 pr-2 text-right text-slate-500">{fmtAgo(it.timestamp)}</td>
-      </tr>
+    <div className="rounded-lg hover:bg-zinc-900 transition-colors">
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center gap-3 px-2 py-2.5 text-left"
+      >
+        <span className="text-zinc-600">
+          {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </span>
+        <span className="flex-1 min-w-0 truncate text-sm text-zinc-200">{it.question}</span>
+        <span className="hidden sm:flex items-center gap-1.5">
+          <Tag>{it.role}</Tag>
+          <Tag>{it.seniority}</Tag>
+        </span>
+        <span className="w-12 text-right font-mono text-sm text-zinc-300 tabular">{it.count}</span>
+        <span className="w-20 text-right text-xs text-zinc-500">{fmtAgo(it.timestamp)}</span>
+      </button>
       {open && (
-        <tr className="bg-ink/40">
-          <td></td>
-          <td colSpan={5} className="py-2 pr-4 text-slate-300 text-[13px] whitespace-pre-wrap">{it.answer}</td>
-        </tr>
+        <div className="animate-expand px-2 pb-3 pl-9 text-[13px] text-zinc-400 whitespace-pre-wrap">
+          {it.answer}
+        </div>
       )}
-    </>
+    </div>
   );
 }
