@@ -1,0 +1,107 @@
+{
+  "name": "orgcache",
+  "displayName": "OrgCache",
+  "description": "Role-aware semantic cache popups for engineering teams — instant answers before they hit your coding agent.",
+  "version": "1.0.0",
+  "publisher": "acmecorp",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "main": "./dist/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "configuration": {
+      "title": "OrgCache",
+      "properties": {
+        "orgcache.serverUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "OrgCache backend base URL."
+        },
+        "orgcache.org": {
+          "type": "string",
+          "default": "acmecorp",
+          "description": "Organization id to query."
+        },
+        "orgcache.userName": {
+          "type": "string",
+          "default": "",
+          "description": "Your name (for activity attribution)."
+        },
+        "orgcache.role": {
+          "type": "string",
+          "enum": ["engineer", "designer", "pm", "devops", "manager"],
+          "default": "engineer",
+          "description": "Your role."
+        },
+        "orgcache.seniority": {
+          "type": "string",
+          "enum": ["junior", "mid", "senior", "staff", "principal"],
+          "default": "junior",
+          "description": "Your seniority level."
+        },
+        "orgcache.joinDate": {
+          "type": "string",
+          "default": "",
+          "description": "Your join date (ISO, e.g. 2026-06-01). Used to derive onboarding vs experienced tenure."
+        },
+        "orgcache.hookPort": {
+          "type": "number",
+          "default": 7777,
+          "description": "Local port for the Claude Code PreToolUse hook listener."
+        },
+        "orgcache.similarityThreshold": {
+          "type": "number",
+          "default": 0.85,
+          "description": "Minimum similarity to show the cache-hit popup."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "orgcache.checkSelection",
+        "title": "OrgCache: Check selection against cache"
+      },
+      {
+        "command": "orgcache.openTrending",
+        "title": "OrgCache: Refresh trending FAQs"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "orgcache",
+          "title": "OrgCache",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "orgcache": [
+        {
+          "type": "webview",
+          "id": "orgcache.trending",
+          "name": "Trending FAQs"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc --noEmit && node build.js",
+    "build": "node build.js",
+    "watch": "node build.js --watch",
+    "mock": "node mock/server.js",
+    "test": "vitest run",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.31.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.1"
+  }
+}

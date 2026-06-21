@@ -1,0 +1,19 @@
+{
+  "name": "orgcache-mcp-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server exposing OrgCache (check_cache / store_answer / get_trending) to any MCP-compatible agent.",
+  "bin": {
+    "orgcache-mcp": "index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "mock": "node mock-backend.js",
+    "test": "node test/smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "^3.23.8"
+  }
+}

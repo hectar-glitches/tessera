@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # Default monthly budget per org (USD) used by the dashboard budget bar
     default_budget_usd: float = 50.0
 
+    # Arize observability (optional). Without keys, decisions are logged to stdout.
+    arize_api_key: str = ""
+    arize_space_key: str = ""
+    arize_model_id: str = "orgcache-decisions"
+
     # Sentry — observability for the cognition pipeline + AI-governance events.
     # Leave SENTRY_DSN empty to disable: all telemetry calls become no-ops.
     sentry_dsn: str = ""
@@ -40,6 +45,17 @@ class Settings(BaseSettings):
     # Boundary-probe alerting: N attempts on gated content within the window -> issue.
     probe_window_seconds: int = 120
     probe_threshold: int = 3
+
+    # CORS — comma-separated list of allowed origins. Defaults to "*" (open) for local
+    # dev; set CORS_ORIGINS in production to lock down to the dashboard URL(s).
+    cors_origins: str = "*"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        raw = self.cors_origins.strip()
+        if not raw or raw == "*":
+            return ["*"]
+        return [o.strip() for o in raw.split(",") if o.strip()]
 
 
 @lru_cache

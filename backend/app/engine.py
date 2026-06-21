@@ -55,6 +55,9 @@ class QueryResult:
     via: str = ""
     model: str = ""
     entities: List[str] = field(default_factory=list)
+    role: str = ""
+    seniority: str = ""
+    min_seniority_level: int = 1
     access_level: str = "public"
     access_teams: List[str] = field(default_factory=list)
     sources: List[str] = field(default_factory=list)
@@ -112,7 +115,27 @@ class Engine:
         self.settings = get_settings()
 
     # -------------------------------------------------------------- main query
-    def query(
+    def query(self, org: str, question: str, role: Optional[str] = None,
+              seniority: Optional[str] = None, **kwargs) -> QueryResult:
+        """Public entrypoint: runs the decision and logs it to Arize (single site)."""
+        from . import arize_logger
+
+        t0 = time.perf_counter()
+        result = self._query_impl(org, question, role=role, seniority=seniority,
+                                  **kwargs)
+        arize_logger.log_decision(
+            question=question,
+            cache_hit=result.decision == "hit",
+            similarity_score=result.similarity,
+            role=role or "",
+            seniority=seniority or "",
+            tokens_saved=result.tokens_saved,
+            response_time_ms=(time.perf_counter() - t0) * 1000,
+            decision=result.decision,
+        )
+        return result
+
+    def _query_impl(
         self,
         org: str,
         question: str,
@@ -120,7 +143,14 @@ class Engine:
         accept_hash: Optional[str] = None,
         force_generate: bool = False,
         compress: bool = True,
+        role: Optional[str] = None,
+        seniority: Optional[str] = None,
+        tenure: Optional[str] = None,
+        user_level: Optional[int] = None,
     ) -> QueryResult:
+        from .roles import normalize_level
+
+        level = normalize_level(seniority, user_level)
         identity = identity or Identity()
         telemetry.set_identity(identity)
         with telemetry.span("ai.embed", "embed question") as _sp:
@@ -145,10 +175,13 @@ class Engine:
                     required_level=entry.acl_level, required_teams=entry.acl_teams,
                     via="accept_hash")
 
-        # Cache search is access-scoped: candidates the identity may not see never
+        # Cache search is both access-scoped (RBAC identity) and segment-scoped
+        # (OrgCache seniority hierarchy + role); candidates the user may not see never
         # appear here, so neither hits NOR suggestions can leak across boundaries.
         with telemetry.span("cache.search", "access-scoped vector search") as _sp:
-            candidates = self.store.search_cache(org, qvec, TOP_K, identity)
+            candidates = self.store.search_cache(
+                org, qvec, TOP_K, user_level=level, role=role, tenure=tenure,
+                identity=identity)
             best = candidates[0] if candidates else None
             telemetry.set_span_data(_sp, candidates=len(candidates),
                                     top_similarity=round(best.score, 4) if best else 0.0)
@@ -188,13 +221,15 @@ class Engine:
 
         # Cache miss -> generate.
         return self._generate(org, question, qvec, qents, identity, compress=compress,
-                              similarity=best.score if best else 0.0)
+                              similarity=best.score if best else 0.0,
+                              role=role, seniority=seniority, tenure=tenure)
 
     # -------------------------------------------------------------- helpers
     def _serve_hit(self, org, question, entry, identity, similarity, note="") -> QueryResult:
         saved_tokens = entry.tokens_in + entry.tokens_out
         saved_usd = _dollars(entry.tokens_in, entry.tokens_out)
         self.store.bump_stats(org, hits=1, tokens_saved=saved_tokens, saved_usd=saved_usd)
+        self.store.bump_hit(org, entry.hash)
         telemetry.tag_decision("hit", entry.acl_level)
         telemetry.breadcrumb("cache.hit", "served from cache",
                              access_level=entry.acl_level, saved_usd=round(saved_usd, 6))
@@ -204,12 +239,17 @@ class Engine:
             decision="hit",
             cached=True,
             answer=entry.answer,
-            similarity=round(similarity, 4),
+            # Clamp: the tenure re-rank boost can push a raw match score above 1.0,
+            # but the reported similarity should stay a clean 0..1 value.
+            similarity=round(min(1.0, similarity), 4),
             matched_question=entry.question,
             tokens_saved=saved_tokens,
             dollars_saved=round(saved_usd, 6),
             via="cache",
             model="cache",
+            role=entry.role,
+            seniority=entry.seniority,
+            min_seniority_level=entry.min_seniority_level,
             access_level=entry.acl_level,
             access_teams=entry.acl_teams,
             sources=entry.chunk_ids,
@@ -223,7 +263,8 @@ class Engine:
                 and not acl.can_access(identity, glob[0].acl_level, glob[0].acl_teams)):
             telemetry.note_boundary_attempt(org, identity, question, glob[0])
 
-    def _generate(self, org, question, qvec, qents, identity, compress, similarity) -> QueryResult:
+    def _generate(self, org, question, qvec, qents, identity, compress, similarity,
+                  role=None, seniority=None, tenure=None) -> QueryResult:
         # RAG retrieval is itself access-scoped: a low-clearance user's answer can only
         # ever be grounded on chunks they're allowed to read.
         with telemetry.span("rag.retrieve", "access-scoped retrieval") as _sp:
@@ -242,6 +283,7 @@ class Engine:
                 decision="miss", cached=False, answer=NO_SOURCE_ANSWER,
                 similarity=round(similarity, 4), matched_question=None,
                 via="policy", model="access", entities=qents,
+                role=role or "", seniority=seniority or "",
                 access_level=identity.level,
             )
 
@@ -284,6 +326,9 @@ class Engine:
                 chunk_ids=chunk_ids,
                 tokens_in=gen.tokens_in,
                 tokens_out=gen.tokens_out,
+                role=role or "",
+                seniority=seniority or "",
+                tenure=tenure or "",
                 acl_level=label.level,
                 acl_teams=label.teams,
             )
@@ -300,6 +345,8 @@ class Engine:
                 via=gen.via,
                 model=gen.model,
                 entities=qents,
+                role=role or "",
+                seniority=seniority or "",
                 access_level=label.level,
                 access_teams=label.teams,
                 sources=chunk_ids,
