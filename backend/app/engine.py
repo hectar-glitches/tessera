@@ -191,7 +191,9 @@ class Engine:
             decision="hit",
             cached=True,
             answer=entry.answer,
-            similarity=round(similarity, 4),
+            # Clamp: the tenure re-rank boost can push a raw match score above 1.0,
+            # but the reported similarity should stay a clean 0..1 value.
+            similarity=round(min(1.0, similarity), 4),
             matched_question=entry.question,
             tokens_saved=saved_tokens,
             dollars_saved=round(saved_usd, 6),
