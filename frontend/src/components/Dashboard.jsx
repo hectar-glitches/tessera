@@ -1,60 +1,93 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   DollarSign, PiggyBank, Zap, ShieldCheck, RefreshCw, Activity,
-  Play, FileEdit, Trash2, CheckCircle2, XCircle,
+  Play, FileEdit, Trash2, CheckCircle2, XCircle, Building2,
 } from "lucide-react";
-import { api } from "../api.js";
+import { createApi } from "../api.js";
+import FilterBar from "./FilterBar.jsx";
+import CacheHealth from "./CacheHealth.jsx";
+import TrendingTable from "./TrendingTable.jsx";
+import EntryManager from "./EntryManager.jsx";
+
+const ORGS = [
+  { id: "acmecorp", label: "AcmeCorp (OrgCache)" },
+  { id: "ask-ddoski", label: "Ask Ddoski (legacy)" },
+];
 
 export default function Dashboard() {
+  const [org, setOrg] = useState("acmecorp");
+  const [filters, setFilters] = useState({});
   const [stats, setStats] = useState(null);
   const [events, setEvents] = useState([]);
+  const [entryCount, setEntryCount] = useState(null);
+
+  const client = useMemo(() => createApi(org), [org]);
 
   const refresh = useCallback(async () => {
-    const [s, a] = await Promise.all([api.stats(), api.activity(40)]);
+    const [s, a, e] = await Promise.all([
+      client.stats(),
+      client.activity(40),
+      client.entries(filters),
+    ]);
     setStats(s);
-    setEvents(a.events);
-  }, []);
+    setEvents(a.events || []);
+    setEntryCount((e.entries || []).length);
+  }, [client, filters]);
+
+  // Make sure the selected org is seeded before we render its data.
+  useEffect(() => {
+    let alive = true;
+    client.info()
+      .then((i) => { if (!i.chunks && !i.cache_size) return client.ingestSeed(); })
+      .catch(() => {})
+      .finally(() => { if (alive) refresh(); });
+    return () => { alive = false; };
+  }, [client]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 3000);
+    const t = setInterval(refresh, 4000);
     return () => clearInterval(t);
   }, [refresh]);
 
   return (
     <div className="space-y-5">
-      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Stat icon={PiggyBank} color="emerald" label="Saved by cache"
-          value={stats ? `$${stats.saved_usd.toFixed(4)}` : "—"}
-          sub={stats ? `${stats.tokens_saved.toLocaleString()} tokens` : ""} />
-        <Stat icon={DollarSign} color="indigo" label="Spent on generation"
-          value={stats ? `$${stats.spend_usd.toFixed(4)}` : "—"}
-          sub={stats ? `${stats.tokens_spent.toLocaleString()} tokens` : ""} />
-        <Stat icon={Zap} color="amber" label="Cache hit rate"
-          value={stats ? `${stats.hit_rate_pct}%` : "—"}
-          sub={stats ? `${stats.hits} hits / ${stats.total_requests} reqs` : ""} />
-        <Stat icon={ShieldCheck} color="sky" label="Near-miss catches"
-          value={stats ? `${stats.suggests}` : "—"}
-          sub="routed to safety popup" />
-      </div>
-
-      <BudgetBar stats={stats} onChange={refresh} />
-
-      <div className="grid lg:grid-cols-2 gap-5">
-        <ActivityFeed events={events} />
-        <ConfidencePanel />
-      </div>
-
-      <InvalidationDemo onDone={refresh} />
-
-      <div className="flex justify-end">
+      <div className="flex items-center justify-between gap-3">
+        <label className="flex items-center gap-2 bg-panel border border-edge rounded-xl px-3 py-2">
+          <Building2 size={15} className="text-indigo-400" />
+          <select
+            value={org}
+            onChange={(e) => { setOrg(e.target.value); setFilters({}); }}
+            className="bg-transparent text-sm outline-none text-slate-200"
+          >
+            {ORGS.map((o) => <option key={o.id} value={o.id} className="bg-ink">{o.label}</option>)}
+          </select>
+        </label>
         <button
-          onClick={async () => { await api.reset(); await api.ingestSeed(); refresh(); }}
+          onClick={async () => { await client.reset(); await client.ingestSeed(); refresh(); }}
           className="text-xs flex items-center gap-1.5 text-slate-400 hover:text-rose-300"
         >
           <Trash2 size={14} /> Reset org &amp; re-seed
         </button>
       </div>
+
+      <FilterBar value={filters} onChange={setFilters} />
+
+      <CacheHealth stats={stats} entryCount={entryCount} />
+
+      <BudgetBar stats={stats} api={client} onChange={refresh} />
+
+      <div className="grid lg:grid-cols-2 gap-5">
+        <TrendingTable api={client} filters={filters} />
+        <EntryManager api={client} filters={filters} />
+      </div>
+
+      <div className="grid lg:grid-cols-2 gap-5">
+        <ActivityFeed events={events} />
+        <ConfidencePanel api={client} />
+      </div>
+
+      {org === "ask-ddoski" && <InvalidationDemo api={client} onDone={refresh} />}
     </div>
   );
 }
@@ -78,7 +111,7 @@ function Stat({ icon: Icon, color, label, value, sub }) {
   );
 }
 
-function BudgetBar({ stats, onChange }) {
+function BudgetBar({ stats, api, onChange }) {
   const [budget, setBudget] = useState("");
   if (!stats) return null;
   const pct = stats.budget_used_pct;
@@ -107,6 +140,7 @@ function BudgetBar({ stats, onChange }) {
           className="flex items-center gap-2"
           onSubmit={async (e) => { e.preventDefault(); if (budget) { await api.setBudget(parseFloat(budget)); setBudget(""); onChange(); } }}
         >
+          {/* budget update uses the per-org api client */}
           <input
             value={budget}
             onChange={(e) => setBudget(e.target.value)}
@@ -163,7 +197,7 @@ function ActivityFeed({ events }) {
   );
 }
 
-function ConfidencePanel() {
+function ConfidencePanel({ api }) {
   const [data, setData] = useState(null);
   const [running, setRunning] = useState(false);
 
@@ -246,14 +280,14 @@ function Mark({ ok }) {
   );
 }
 
-function InvalidationDemo({ onDone }) {
+function InvalidationDemo({ api, onDone }) {
   const [doc, setDoc] = useState("");
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     api.guide().then((g) => setDoc(g.document)).catch(() => {});
-  }, []);
+  }, [api]);
 
   async function reingest() {
     setBusy(true);
