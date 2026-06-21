@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # Default monthly budget per org (USD) used by the dashboard budget bar
     default_budget_usd: float = 50.0
 
+    # Arize observability (optional). Without keys, decisions are logged to stdout.
+    arize_api_key: str = ""
+    arize_space_key: str = ""
+    arize_model_id: str = "orgcache-decisions"
+
 
 @lru_cache
 def get_settings() -> Settings:

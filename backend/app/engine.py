@@ -99,7 +99,27 @@ class Engine:
         self.settings = get_settings()
 
     # -------------------------------------------------------------- main query
-    def query(
+    def query(self, org: str, question: str, role: Optional[str] = None,
+              seniority: Optional[str] = None, **kwargs) -> QueryResult:
+        """Public entrypoint: runs the decision and logs it to Arize (single site)."""
+        from . import arize_logger
+
+        t0 = time.perf_counter()
+        result = self._query_impl(org, question, role=role, seniority=seniority,
+                                  **kwargs)
+        arize_logger.log_decision(
+            question=question,
+            cache_hit=result.decision == "hit",
+            similarity_score=result.similarity,
+            role=role or "",
+            seniority=seniority or "",
+            tokens_saved=result.tokens_saved,
+            response_time_ms=(time.perf_counter() - t0) * 1000,
+            decision=result.decision,
+        )
+        return result
+
+    def _query_impl(
         self,
         org: str,
         question: str,
