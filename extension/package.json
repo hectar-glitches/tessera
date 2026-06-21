@@ -3,11 +3,11 @@
   "displayName": "Tessera",
   "description": "Role-aware semantic cache for engineering teams — instant answers before they hit your coding agent.",
   "version": "1.0.0",
-  "publisher": "acmecorp",
+  "publisher": "madiyarzhunussov",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/acmecorp/tessera"
+    "url": "https://github.com/madiyarzhunussov/tessera"
   },
   "private": true,
   "engines": {
@@ -54,7 +54,7 @@
         },
         "tessera.hookPort": {
           "type": "number",
-          "default": 7777,
+          "default": 7778,
           "description": "Local port for the Claude Code PreToolUse hook listener."
         },
         "tessera.similarityThreshold": {
@@ -98,10 +98,12 @@
     "build": "node build.js",
     "watch": "node build.js --watch",
     "mock": "node mock/server.js",
+    "dev": "concurrently -n mock,watch -c cyan,yellow \"node mock/server.js\" \"node build.js --watch\"",
     "test": "vitest run",
     "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
+    "concurrently": "^9.0.0",
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^2.31.0",

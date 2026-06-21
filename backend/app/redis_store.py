@@ -16,7 +16,10 @@ from typing import Dict, List, Optional
 import numpy as np
 import redis
 from redis.commands.search.field import NumericField, TagField, TextField, VectorField
-from redis.commands.search.index_definition import IndexDefinition, IndexType
+try:
+    from redis.commands.search.index_definition import IndexDefinition, IndexType  # redis-py 4.x
+except ImportError:
+    from redis.commands.search.commands import IndexDefinition, IndexType  # redis-py 5.x
 from redis.commands.search.query import Query
 
 from . import acl, embeddings
