@@ -32,7 +32,7 @@ from redis.commands.search.query import Query
 from . import acl, embeddings
 from .acl import Identity
 from .config import get_settings
-from .store import BaseStore, CacheCandidate, Chunk, ChunkHit, LogEntry
+from .store import BaseStore, CacheCandidate, Chunk, ChunkHit, LogEntry, ttl_tiers
 
 INDEX_NAME = "tessera:idx:v3"  # carries OrgCache role fields + RBAC acl_level/acl_team
 KEY_PREFIX = "org:"
@@ -470,6 +470,94 @@ class RedisStore(BaseStore):
 
     def cache_size(self, org) -> int:
         return int(self.r.scard(self._cacheidx_key(org)) or 0)
+
+    # ----- introspection (the "Redis under the hood" dashboard panel) -----
+    def _count_keys(self, pattern: str) -> int:
+        cursor, n = 0, 0
+        while True:
+            cursor, keys = self.r.scan(cursor, match=pattern, count=500)
+            n += len(keys)
+            if cursor == 0:
+                break
+        return n
+
+    def internals(self, org) -> dict:
+        """Live Redis internals: the vector index, keyspace, the chunkmap reverse
+        index, and per-entry TTLs. Every probe is guarded so a restricted command
+        (some managed tiers disable INFO/MODULE LIST) degrades gracefully.
+        """
+        out: dict = {
+            "backend": "redis",
+            "index": {"name": INDEX_NAME, "vector_dim": self.dim,
+                      "distance_metric": "COSINE", "algorithm": "HNSW"},
+            "keys": {},
+            "server": {},
+            "modules": [],
+            "reverse_index_sample": None,
+            "sample_ttls": [],
+            "ttl_tiers": ttl_tiers(),
+        }
+        try:
+            info = self.r.info()
+            out["server"] = {
+                "redis_version": info.get("redis_version"),
+                "used_memory_human": info.get("used_memory_human"),
+                "uptime_days": info.get("uptime_in_days"),
+            }
+        except Exception:
+            pass
+        try:
+            mods = []
+            for m in self.r.module_list():
+                name = m.get(b"name") if isinstance(m, dict) else None
+                name = name if name is not None else (
+                    m.get("name") if isinstance(m, dict) else None)
+                if isinstance(name, bytes):
+                    name = name.decode()
+                if name:
+                    mods.append(name)
+            out["modules"] = sorted(mods)
+        except Exception:
+            pass
+        try:
+            idx = self.r.ft(INDEX_NAME).info()
+            num = idx.get("num_docs", idx.get(b"num_docs", 0))
+            out["index"]["num_docs"] = int(num or 0)
+        except Exception:
+            pass
+        try:
+            out["keys"]["cache_entries"] = int(self.r.scard(self._cacheidx_key(org)) or 0)
+            out["keys"]["chunks"] = self._count_keys(self._chunk_key(org, "*"))
+            out["keys"]["reverse_index_sets"] = self._count_keys(
+                self._chunkmap_key(org, "*"))
+        except Exception:
+            pass
+        try:
+            _, keys = self.r.scan(0, match=self._chunkmap_key(org, "*"), count=20)
+            if keys:
+                kname = keys[0].decode() if isinstance(keys[0], bytes) else keys[0]
+                out["reverse_index_sample"] = {
+                    "chunk_id": kname.rsplit(":chunkmap:", 1)[-1],
+                    "cache_entries_pointing_here": int(self.r.scard(keys[0]) or 0),
+                }
+        except Exception:
+            pass
+        try:
+            samples = []
+            _, keys = self.r.scan(0, match=self._cache_key(org, "*"), count=10)
+            for k in list(keys)[:5]:
+                ttl = self.r.ttl(k)
+                lvl_raw = self.r.hget(k, "acl_level")
+                kname = k.decode() if isinstance(k, bytes) else k
+                samples.append({
+                    "hash": kname.rsplit(":cache:", 1)[-1],
+                    "level": acl.rank_to_name(int(lvl_raw or 0)),
+                    "ttl_seconds": int(ttl) if ttl and ttl > 0 else None,
+                })
+            out["sample_ttls"] = samples
+        except Exception:
+            pass
+        return out
 
     # ----- logs / stats -----
     def append_log(self, org, entry: LogEntry) -> None:

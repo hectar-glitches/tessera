@@ -91,6 +91,22 @@ export function mockApi(org, key, ...args) {
       return { org, status: "reset" };
     case "guide":
       return { document: "# AcmeCorp Guide (mock)\n" };
+    case "redisInternals":
+      return {
+        backend: "redis",
+        server: { redis_version: "7.4.0", used_memory_human: "3.2M", uptime_days: 1 },
+        modules: ["ReJSON", "search"],
+        index: { name: "tessera:idx:v3", num_docs: 21, vector_dim: 384, distance_metric: "COSINE", algorithm: "HNSW" },
+        keys: { chunks: 12, cache_entries: ENTRIES.length, reverse_index_sets: 12 },
+        reverse_index_sample: { chunk_id: "guide#sec-saturday-meals", cache_entries_pointing_here: 3 },
+        sample_ttls: [
+          { hash: "m9", level: "exec", ttl_seconds: 900 },
+          { hash: "m8", level: "manager", ttl_seconds: 3600 },
+          { hash: "m4", level: "employee", ttl_seconds: 86400 },
+          { hash: "m1", level: "public", ttl_seconds: 604800 },
+        ],
+        ttl_tiers: { public: 604800, employee: 86400, manager: 3600, exec: 900 },
+      };
     default:
       return {};
   }

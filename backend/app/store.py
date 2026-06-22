@@ -19,6 +19,13 @@ from .acl import Identity
 from .config import get_settings
 
 
+def ttl_tiers() -> Dict[str, int]:
+    """The sensitivity-tiered TTLs (seconds), surfaced in the introspection panel."""
+    s = get_settings()
+    return {lvl: s.cache_ttl_for(lvl)
+            for lvl in ("public", "employee", "manager", "exec")}
+
+
 @dataclass
 class ChunkHit:
     chunk_id: str
@@ -214,6 +221,11 @@ class BaseStore(ABC):
 
     @abstractmethod
     def get_budget(self, org: str) -> float: ...
+
+    # ----- introspection (the "Redis under the hood" dashboard panel) -----
+    def internals(self, org: str) -> dict:
+        """Backend internals for the dashboard. Concrete stores override with detail."""
+        return {"backend": self.backend, "ttl_tiers": ttl_tiers()}
 
     # ----- in-flight coalescing lock (stretch goal 2) -----
     def try_lock(self, key: str, ttl: int = 15) -> bool:
@@ -430,6 +442,20 @@ class MemoryStore(BaseStore):
 
     def get_budget(self, org) -> float:
         return self._budget.get(org, self.default_budget)
+
+    def internals(self, org) -> dict:
+        self._sweep_expired(org)
+        rev = self._reverse.get(org, {})
+        return {
+            "backend": "memory",
+            "note": "In-memory fallback — Redis is not connected.",
+            "keys": {
+                "chunks": len(self._chunks.get(org, {})),
+                "cache_entries": len(self._cache.get(org, {})),
+                "reverse_index_sets": len([c for c, s in rev.items() if s]),
+            },
+            "ttl_tiers": ttl_tiers(),
+        }
 
 
 _store: Optional[BaseStore] = None

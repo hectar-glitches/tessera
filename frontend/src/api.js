@@ -7,11 +7,18 @@ export const ORG = "ask-ddoski";
 // only when a live request fails, so the dashboard always renders.
 const USE_MOCK = import.meta.env.VITE_USE_MOCK === "1";
 
+// Set after a successful /auth/login. Once present, every request carries
+// `Authorization: Bearer <token>` and the backend derives identity from the SIGNED
+// claims, ignoring any identity sent in the request body.
+let AUTH_TOKEN = null;
+export function setAuthToken(token) {
+  AUTH_TOKEN = token || null;
+}
+
 async function req(path, opts = {}) {
-  const res = await fetch(`${BASE}/api${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...opts,
-  });
+  const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  if (AUTH_TOKEN) headers["Authorization"] = `Bearer ${AUTH_TOKEN}`;
+  const res = await fetch(`${BASE}/api${path}`, { ...opts, headers });
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
   return res.json();
 }
@@ -38,6 +45,7 @@ export function createApi(org) {
     org,
     health: () => guard(() => req(`/health`), "health"),
     info: () => guard(() => req(`/orgs/${org}/info`), "info"),
+    redisInternals: () => guard(() => req(`/orgs/${org}/redis`), "redisInternals"),
     ingestSeed: () => guard(() => req(`/orgs/${org}/ingest/seed`, { method: "POST" }), "ingestSeed"),
     ingest: (document) =>
       guard(() => req(`/orgs/${org}/ingest`, { method: "POST", body: JSON.stringify({ document }) }), "ingest"),
@@ -68,6 +76,13 @@ export const api = {
   health: () => req(`/health`),
   info: () => req(`/orgs/${ORG}/info`),
   identities: () => req(`/identities`),
+  // Simulated SSO: exchange a persona for a server-signed token, then attach it to
+  // all subsequent requests so identity is taken from the signed claims, not the body.
+  login: async (user) => {
+    const r = await req(`/auth/login`, { method: "POST", body: JSON.stringify({ user }) });
+    setAuthToken(r.token);
+    return r;
+  },
   ingestSeed: () => req(`/orgs/${ORG}/ingest/seed`, { method: "POST" }),
   ingest: (document) =>
     req(`/orgs/${ORG}/ingest`, { method: "POST", body: JSON.stringify({ document }) }),

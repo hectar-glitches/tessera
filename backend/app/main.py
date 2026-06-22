@@ -8,12 +8,14 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
+from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import (
     acl,
+    auth,
     embeddings,
     eval as eval_mod,
     ingest as ingest_mod,
@@ -28,6 +30,7 @@ from .models import (
     BudgetRequest,
     EntryUpdateRequest,
     IngestRequest,
+    LoginRequest,
     QueryRequest,
     QueryResponse,
 )
@@ -43,6 +46,11 @@ DEMO_IDENTITIES = [
     {"user": "Priya", "role": "Finance Manager", "team": "finance", "level": "manager"},
     {"user": "Dana", "role": "CEO", "team": "exec", "level": "exec"},
 ]
+
+# Server-authoritative identity directory (simulates the org's IdP/SSO). /auth/login
+# resolves a user to THESE claims and signs them — the client never chooses its own
+# clearance.
+_DIRECTORY = {d["user"].lower(): d for d in DEMO_IDENTITIES}
 
 telemetry.init()
 
@@ -95,6 +103,13 @@ def org_info(org: str):
     }
 
 
+@app.get("/api/orgs/{org}/redis")
+def redis_internals(org: str):
+    """'Redis under the hood': the vector index, chunkmap reverse index, and live
+    per-entry TTLs. Degrades to in-memory key counts when Redis isn't connected."""
+    return get_store().internals(org)
+
+
 @app.post("/api/orgs/{org}/ingest/seed")
 def ingest_seed(org: str):
     # OrgCache demo org loads the 60 role-tagged Q&As as pre-populated cache entries;
@@ -122,6 +137,28 @@ def identities():
     return {"identities": DEMO_IDENTITIES, "levels": list(acl.LEVELS.keys())}
 
 
+@app.post("/api/auth/login")
+def login(req: LoginRequest):
+    """Simulated IdP: resolve a user to server-authoritative claims and sign them.
+
+    The clearance level + team come from the server directory, NOT from the client, so
+    no caller can mint themselves a higher clearance. Returns a signed token to send as
+    ``Authorization: Bearer <token>`` on subsequent /query calls.
+    """
+    person = _DIRECTORY.get(req.user.strip().lower())
+    if not person:
+        raise HTTPException(status_code=401,
+                            detail={"error": f"unknown user: {req.user}"})
+    token = auth.issue_token(user=person["user"], team=person["team"],
+                             level=person["level"])
+    return {
+        "token": token,
+        "token_type": "bearer",
+        "identity": {"user": person["user"], "team": person["team"],
+                     "level": person["level"], "role": person["role"]},
+    }
+
+
 def _validate_segment(req: QueryRequest) -> None:
     if not roles.is_valid_role(req.role):
         raise HTTPException(status_code=400, detail={"error": f"invalid role: {req.role}"})
@@ -133,11 +170,35 @@ def _validate_segment(req: QueryRequest) -> None:
                             detail={"error": f"invalid tenure: {req.tenure}"})
 
 
-def _run_query(org: str, req: QueryRequest) -> QueryResponse:
+def _resolve_identity(req: QueryRequest, authorization: Optional[str]) -> acl.Identity:
+    """Resolve the caller's identity for this request.
+
+    A valid signed token ALWAYS wins over the request body — so a client claiming
+    ``identity.level = exec`` in the body is ignored whenever a token is present. The
+    body fallback is a dev/legacy convenience and is refused entirely when
+    ``require_auth`` is set.
+    """
+    token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    if token:
+        claims = auth.verify_token(token)
+        if claims is None:
+            raise HTTPException(status_code=401,
+                                detail={"error": "invalid or expired token"})
+        return acl.Identity.from_dict(claims)
+    if get_settings().require_auth:
+        raise HTTPException(status_code=401,
+                            detail={"error": "authentication required"})
+    return acl.Identity.from_dict(req.identity.model_dump() if req.identity else None)
+
+
+def _run_query(org: str, req: QueryRequest,
+               authorization: Optional[str] = None) -> QueryResponse:
     if not req.question.strip():
         raise HTTPException(status_code=400, detail={"error": "empty question"})
     _validate_segment(req)
-    identity = acl.Identity.from_dict(req.identity.model_dump() if req.identity else None)
+    identity = _resolve_identity(req, authorization)
     result = _engine().query(
         org=org,
         question=req.question,
@@ -153,14 +214,14 @@ def _run_query(org: str, req: QueryRequest) -> QueryResponse:
 
 
 @app.post("/api/orgs/{org}/query", response_model=QueryResponse)
-def query(org: str, req: QueryRequest):
-    return _run_query(org, req)
+def query(org: str, req: QueryRequest, authorization: Optional[str] = Header(None)):
+    return _run_query(org, req, authorization)
 
 
 @app.post("/api/orgs/{org}/check", response_model=QueryResponse)
-def check(org: str, req: QueryRequest):
+def check(org: str, req: QueryRequest, authorization: Optional[str] = Header(None)):
     """Alias of /query used by the VS Code extension's PreToolUse hook."""
-    return _run_query(org, req)
+    return _run_query(org, req, authorization)
 
 
 @app.get("/api/orgs/{org}/stats")

@@ -22,6 +22,12 @@ class QueryRequest(BaseModel):
     identity: Optional[IdentityModel] = None
 
 
+class LoginRequest(BaseModel):
+    # The client picks *who* to sign in as; the server (not the client) decides that
+    # identity's clearance level + team from its directory and signs it.
+    user: str
+
+
 class IngestRequest(BaseModel):
     document: str
 
