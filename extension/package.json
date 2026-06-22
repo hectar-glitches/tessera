@@ -1,9 +1,14 @@
 {
-  "name": "orgcache",
-  "displayName": "OrgCache",
-  "description": "Role-aware semantic cache popups for engineering teams — instant answers before they hit your coding agent.",
+  "name": "tessera",
+  "displayName": "Tessera",
+  "description": "Role-aware semantic cache for engineering teams — instant answers before they hit your coding agent.",
   "version": "1.0.0",
-  "publisher": "acmecorp",
+  "publisher": "madiyarzhunussov",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/madiyarzhunussov/tessera"
+  },
   "private": true,
   "engines": {
     "vscode": "^1.85.0"
@@ -13,76 +18,92 @@
   "activationEvents": ["onStartupFinished"],
   "contributes": {
     "configuration": {
-      "title": "OrgCache",
+      "title": "Tessera",
       "properties": {
-        "orgcache.serverUrl": {
+        "tessera.serverUrl": {
           "type": "string",
           "default": "http://localhost:8000",
-          "description": "OrgCache backend base URL."
+          "description": "Tessera backend base URL."
         },
-        "orgcache.org": {
+        "tessera.org": {
           "type": "string",
           "default": "acmecorp",
           "description": "Organization id to query."
         },
-        "orgcache.userName": {
+        "tessera.userName": {
           "type": "string",
           "default": "",
           "description": "Your name (for activity attribution)."
         },
-        "orgcache.role": {
+        "tessera.role": {
           "type": "string",
           "enum": ["engineer", "designer", "pm", "devops", "manager"],
           "default": "engineer",
           "description": "Your role."
         },
-        "orgcache.seniority": {
+        "tessera.seniority": {
           "type": "string",
           "enum": ["junior", "mid", "senior", "staff", "principal"],
           "default": "junior",
           "description": "Your seniority level."
         },
-        "orgcache.joinDate": {
+        "tessera.joinDate": {
           "type": "string",
           "default": "",
           "description": "Your join date (ISO, e.g. 2026-06-01). Used to derive onboarding vs experienced tenure."
         },
-        "orgcache.hookPort": {
+        "tessera.hookPort": {
           "type": "number",
-          "default": 7777,
+          "default": 7778,
           "description": "Local port for the Claude Code PreToolUse hook listener."
         },
-        "orgcache.similarityThreshold": {
+        "tessera.hookHoldTimeoutMs": {
+          "type": "number",
+          "default": 600000,
+          "description": "How long (ms) to pause Claude Code on a cache hit while waiting for your sidebar decision before automatically continuing the agent."
+        },
+        "tessera.similarityThreshold": {
           "type": "number",
           "default": 0.85,
           "description": "Minimum similarity to show the cache-hit popup."
+        },
+        "tessera.cacheTtlDays": {
+          "type": "number",
+          "enum": [7, 14, 30, 60, 90, 0],
+          "enumDescriptions": ["7 days", "14 days", "30 days", "60 days", "90 days", "Never expire"],
+          "default": 30,
+          "description": "How long cached entries are considered fresh. 0 = never expire."
         }
       }
     },
     "commands": [
       {
-        "command": "orgcache.checkSelection",
-        "title": "OrgCache: Check selection against cache"
+        "command": "tessera.checkSelection",
+        "title": "Tessera: Check selection against cache"
       },
       {
-        "command": "orgcache.openTrending",
-        "title": "OrgCache: Refresh trending FAQs"
+        "command": "tessera.openTrending",
+        "title": "Tessera: Refresh trending FAQs"
+      },
+      {
+        "command": "tessera.setProfile",
+        "title": "Tessera: Set my role and seniority"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "orgcache",
-          "title": "OrgCache",
+          "id": "tessera",
+          "title": "Tessera",
           "icon": "media/icon.svg"
         }
       ]
     },
     "views": {
-      "orgcache": [
+      "tessera": [
         {
           "type": "webview",
-          "id": "orgcache.trending",
+          "id": "tessera.trending",
           "name": "Trending FAQs"
         }
       ]
@@ -93,10 +114,12 @@
     "build": "node build.js",
     "watch": "node build.js --watch",
     "mock": "node mock/server.js",
+    "dev": "concurrently -n mock,watch -c cyan,yellow \"node mock/server.js\" \"node build.js --watch\"",
     "test": "vitest run",
     "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
+    "concurrently": "^9.0.0",
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^2.31.0",

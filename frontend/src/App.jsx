@@ -1,43 +1,13 @@
 import { useEffect, useState } from "react";
-import Chat from "./components/Chat.jsx";
 import Dashboard from "./components/Dashboard.jsx";
-import IdentitySwitcher from "./components/IdentitySwitcher.jsx";
 import { api } from "./api.js";
 
 export default function App() {
-  const [tab, setTab] = useState("chat");
   const [health, setHealth] = useState(null);
-  const [seeded, setSeeded] = useState(false);
-  const [identities, setIdentities] = useState([]);
-  const [identity, setIdentity] = useState(null);
 
   useEffect(() => {
     api.health().then(setHealth).catch(() => setHealth({ status: "down" }));
-    api.info().then((i) => setSeeded(i.chunks > 0)).catch(() => {});
-    api.identities()
-      .then((d) => {
-        setIdentities(d.identities);
-        setIdentity(d.identities[0]);
-      })
-      .catch(() => {});
   }, []);
-
-  async function ensureSeed() {
-    if (!seeded) {
-      await api.ingestSeed();
-      setSeeded(true);
-    }
-  }
-  useEffect(() => {
-    ensureSeed();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seeded]);
-
-  // Exchange the selected persona for a server-signed token. Identity is then derived
-  // from the signed claims on the backend — the client can't assert its own clearance.
-  useEffect(() => {
-    if (identity?.user) api.login(identity.user).catch(() => {});
-  }, [identity]);
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -46,55 +16,20 @@ export default function App() {
           <div className="flex items-center gap-2.5 select-none">
             <span className="text-xl font-semibold tracking-tightish text-brand">Tessera</span>
             <span className="hidden lg:inline text-xs text-zinc-600">
-              Institutional knowledge, instantly.
+              Admin Dashboard
             </span>
           </div>
 
-          <nav className="flex items-center gap-1 rounded-full bg-surface border border-line p-1">
-            <TabButton active={tab === "chat"} onClick={() => setTab("chat")}>
-              Ask Ddoski
-            </TabButton>
-            <TabButton active={tab === "dash"} onClick={() => setTab("dash")}>
-              Admin
-            </TabButton>
-          </nav>
-
           <div className="flex items-center gap-3">
-            {tab === "chat" && identity && (
-              <IdentitySwitcher
-                identities={identities}
-                identity={identity}
-                onChange={setIdentity}
-              />
-            )}
             <StatusDots health={health} />
           </div>
         </div>
       </header>
 
       <main className="flex-1 max-w-6xl w-full mx-auto px-6 py-8">
-        {tab === "chat" ? (
-          <Chat key={identity?.user} identity={identity} />
-        ) : (
-          <Dashboard />
-        )}
+        <Dashboard />
       </main>
     </div>
-  );
-}
-
-function TabButton({ active, onClick, children }) {
-  return (
-    <button
-      onClick={onClick}
-      className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${
-        active
-          ? "bg-zinc-800 text-zinc-100"
-          : "text-zinc-500 hover:text-zinc-300"
-      }`}
-    >
-      {children}
-    </button>
   );
 }
 

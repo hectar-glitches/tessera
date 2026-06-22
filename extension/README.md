@@ -1,69 +1,83 @@
-# OrgCache VS Code Extension
+# Tessera
 
-Intercepts questions before they hit your coding agent, checks the org-scoped semantic
-cache filtered by **role + seniority + tenure**, and shows an instant answer in a popup
-panel. Also surfaces a trending-FAQ sidebar for your segment.
+**Role-aware semantic cache for engineering teams — instant answers before they hit your coding agent.**
 
-## Develop / run (F5)
+Tessera intercepts questions as you work, checks your org's semantic knowledge cache filtered by **role + seniority + tenure**, and surfaces an instant answer in a clean popup panel. Stop repeating questions across your team.
 
-```bash
-cd extension
-npm install
-npm run build          # esbuild -> dist/extension.js
-npm test               # vitest unit tests (helpers)
-```
+---
 
-Then press **F5** in VS Code (with this folder open) to launch the Extension
-Development Host. The "Run OrgCache Extension" config builds first.
+## Features
 
-### Try it with the mock backend (no real server needed)
+- **Instant popup** — when a question matches the cache at ≥85% similarity, Tessera shows the cached answer inline without interrupting your flow
+- **Role-aware** — answers are filtered by your role, seniority, and tenure so junior engineers see onboarding answers, senior engineers see architecture answers
+- **Trending sidebar** — live view of the top questions your segment is asking, auto-refreshed every 5 minutes
+- **Claude Code integration** — hooks into Claude Code's PreToolUse event to intercept questions before they hit the agent
 
-```bash
-npm run mock           # mock OrgCache backend on http://localhost:8000
-```
+## Getting started
 
-In the Extension Development Host:
-
-1. Set your settings (see below) — defaults already point at the mock.
-2. Run **OrgCache: Check selection against cache** (Command Palette) on the text
-   `how do I run the dev server`.
-3. A popup panel appears: **89%+ match → `npm run dev`** with
-   `[✓ Use This Answer] [Ask Agent →] [✕]`.
-   - **Use This Answer** copies the answer to your clipboard and closes the panel.
-   - **Ask Agent →** dismisses and lets the question flow to your agent.
-   - **✕** dismisses (negative signal, logged to the OrgCache output channel).
-4. Open the **OrgCache** view in the Activity Bar for the trending sidebar (top 5 for
-   your role/seniority/tenure, auto-refreshes every 5 min).
+1. Install the extension
+2. Set your profile in VS Code settings (search **Tessera**):
+   - `tessera.serverUrl` — your Tessera backend URL
+   - `tessera.org` — your organization id
+   - `tessera.role` — engineer / designer / pm / devops / manager
+   - `tessera.seniority` — junior / mid / senior / staff / principal
+3. Open the **Tessera** panel in the Activity Bar to see trending FAQs
+4. Questions are checked automatically via the Claude Code hook, or manually via **Tessera: Check selection against cache** in the Command Palette
 
 ## Settings
 
-| Setting | Default | Notes |
-|---------|---------|-------|
-| `orgcache.serverUrl` | `http://localhost:8000` | Backend base URL |
-| `orgcache.org` | `acmecorp` | Org id |
-| `orgcache.userName` | `""` | Attribution |
-| `orgcache.role` | `engineer` | engineer/designer/pm/devops/manager |
-| `orgcache.seniority` | `junior` | junior/mid/senior/staff/principal |
-| `orgcache.joinDate` | `""` | ISO date → onboarding (<90d) or experienced |
-| `orgcache.hookPort` | `7777` | Claude Code PreToolUse hook listener port |
-| `orgcache.similarityThreshold` | `0.85` | Min similarity to show the popup |
+| Setting | Default | Description |
+|---|---|---|
+| `tessera.serverUrl` | `http://localhost:8000` | Tessera backend base URL |
+| `tessera.org` | `acmecorp` | Organization id |
+| `tessera.userName` | `""` | Your name for attribution |
+| `tessera.role` | `engineer` | Your role |
+| `tessera.seniority` | `junior` | Your seniority level |
+| `tessera.joinDate` | `""` | ISO join date — determines onboarding vs experienced tenure |
+| `tessera.hookPort` | `7778` | Port for the Claude Code PreToolUse hook listener |
+| `tessera.similarityThreshold` | `0.85` | Minimum similarity score to show the popup |
 
-## Claude Code hook
+## Claude Code integration
 
-The extension runs a local listener on `127.0.0.1:7777`. Point a Claude Code
-PreToolUse hook at it; the extension extracts the question, checks the cache, and shows
-the popup on a confident hit. It always responds `{"decision":"continue"}` — the popup
-is advisory and never blocks your agent.
+Tessera runs a local HTTP listener on `127.0.0.1:7778`. Add this to your Claude Code settings to hook into every agent prompt:
 
-## Packaging
-
-```bash
-npm run package        # produces orgcache-1.0.0.vsix (requires @vscode/vsce)
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -s -X POST http://127.0.0.1:7778 -H 'Content-Type: application/json' -d @-",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
-## Notes
+How it behaves:
 
-- Webviews are rendered as inline HTML (no separate bundler) and communicate with the
-  host via `postMessage`.
-- All network calls degrade silently (logged to the **OrgCache** output channel); the
-  extension never throws into the editor, and works fully against `npm run mock`.
+- **Cache hit** — Tessera **pauses Claude Code** by holding the hook response open and shows the cached answer in the sidebar. The agent stays paused until you decide:
+  - **Use Answer** / **Dismiss** → Tessera responds with `permissionDecision: "deny"` and the cached answer as the reason, so Claude Code stops (no tokens spent).
+  - **Ask Agent →** ("ask anyways") → Tessera responds with `permissionDecision: "allow"` and Claude Code proceeds.
+- **Cache miss** — Tessera responds with `permissionDecision: "allow"` immediately; the agent never waits.
+
+Responses use Claude Code's `PreToolUse` hook schema, e.g.:
+
+```json
+{ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "Tessera cache hit — …" } }
+```
+
+> **Important:** set a `timeout` on the hook (seconds) that is at least as long as you want the agent to wait for your decision. The matching cap on the extension side is `tessera.hookHoldTimeoutMs` (default 10 min) — after that Tessera auto-continues the agent so nothing hangs forever.
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `Tessera: Check selection against cache` | Check selected text (or typed input) against the cache |
+| `Tessera: Refresh trending FAQs` | Manually refresh the trending sidebar |

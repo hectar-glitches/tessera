@@ -55,6 +55,14 @@ _DIRECTORY = {d["user"].lower(): d for d in DEMO_IDENTITIES}
 telemetry.init()
 
 app = FastAPI(title="Tessera", version="1.0.0")
+
+
+@app.on_event("startup")
+def _warm_embedder():
+    # Load the embedding model before the first request so seeding always uses
+    # the real semantic backend, never the hashed fallback.
+    backend = embeddings.backend_name()
+    print(f"[tessera] embedding backend: {backend}")
 # Origins come from CORS_ORIGINS (comma-separated). Defaults to "*" for local dev;
 # set it to the dashboard URL(s) in production to lock the API down.
 app.add_middleware(
