@@ -33,6 +33,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seeded]);
 
+  // Exchange the selected persona for a server-signed token. Identity is then derived
+  // from the signed claims on the backend — the client can't assert its own clearance.
+  useEffect(() => {
+    if (identity?.user) api.login(identity.user).catch(() => {});
+  }, [identity]);
+
   return (
     <div className="min-h-screen flex flex-col">
       <header className="sticky top-0 z-20 border-b border-line bg-canvas/80 backdrop-blur-xl">

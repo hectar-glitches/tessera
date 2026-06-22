@@ -7,6 +7,7 @@ import FilterBar from "./FilterBar.jsx";
 import CacheHealth from "./CacheHealth.jsx";
 import TrendingTable from "./TrendingTable.jsx";
 import EntryManager from "./EntryManager.jsx";
+import RedisPanel from "./RedisPanel.jsx";
 import { Panel, SectionHeader } from "./ui.jsx";
 
 const DEFAULT_ORG = import.meta.env.VITE_DEFAULT_ORG || "acmecorp";
@@ -80,6 +81,8 @@ export default function Dashboard() {
       <CacheHealth stats={stats} entryCount={entryCount} />
 
       <BudgetBar stats={stats} api={client} onChange={refresh} />
+
+      <RedisPanel api={client} />
 
       <div className="grid lg:grid-cols-2 gap-5">
         <TrendingTable api={client} filters={filters} />

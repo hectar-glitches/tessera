@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     cache_ttl_manager: int = 3600      # 1 hour
     cache_ttl_exec: int = 900          # 15 minutes — tightest window for top secrecy
 
+    # Auth / trust boundary. Identity claims (clearance level + team) are issued
+    # server-side as HMAC-signed tokens by the simulated IdP (/api/auth/login) and
+    # verified on /query — so a client can never assert its own clearance in the
+    # request body. ``require_auth`` (set REQUIRE_AUTH=1) rejects any /query without a
+    # valid token; left off by default so the dev/mock flow keeps working.
+    auth_secret: str = "tessera-dev-secret-change-me-in-production"
+    auth_token_ttl_seconds: int = 28800  # 8h — a demo/work session
+    require_auth: bool = False
+
     # Arize observability (optional). Without keys, decisions are logged to stdout.
     arize_api_key: str = ""
     arize_space_key: str = ""
